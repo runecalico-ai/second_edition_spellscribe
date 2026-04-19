@@ -37,7 +37,7 @@ The app is a **single-developer hobby tool** targeting Windows 10/11. It does no
 
 **Dependencies Note**: The application includes a fallback mode for systems without NVIDIA GPUs. `marker-pdf` (Surya) is used when CUDA is available; otherwise, the app defaults to `pytesseract` for OCR.
 
-**Python version**: 3.11 (required by marker-pdf).
+**Python version**: 3.12 (required by marker-pdf).
 
 Install command:
 ```
@@ -57,20 +57,24 @@ All spell data is represented by the following Pydantic v2 model. This is the ca
 
 | Rule | Detail |
 |---|---|
-| **School vs Sphere** | Wizard spells populate `school`; Priest spells populate `sphere`. The other field is `None`. A `model_validator` enforces this. |
+| **Class list** | Each spell belongs to a `class_list`: `Wizard` or `Priest`. |
+| **Tradition** | Derived automatically from `class_list`: Wizard → `Arcane`, Priest → `Divine`. Implemented as a `@computed_field` — not stored or extracted, but present in serialized output. |
+| **School** | A list of one or more school names (strings). `SpellSchool` enum values are the canonical set; custom values are accepted but flagged for review. Wizard spells always populate `school`. Priest spells also list schools for reference purposes (e.g. determining spell-resistance interactions). |
+| **Sphere** | Priest spells populate `sphere` with one or more sphere names (strings). `PriestSphere` enum values are the canonical set; custom values are accepted but flagged for review. Wizard spells leave `sphere` as `None`. A `model_validator` enforces this. |
 | **Wizard level** | Integer `0`–`9`. Cantrips are stored as `0`. If the source text says `"Cantrip"`, normalise to `0` during extraction. |
 | **Priest level** | Integer `1`–`7`. Quest spells are stored as `8`. If the source text says `"Quest"`, normalise to `8` during extraction. |
-| **Combined schools** | Slash-separated schools such as `"Invocation/Evocation"` are valid single `WizardSchool` values — do not split them. |
+| **Combined schools** | Slash-separated schools such as `"Invocation/Evocation"` are valid single `SpellSchool` values — do not split them. |
+| **Material components** | Not parsed into a separate field. Material component details remain in the spell `description`. The main application handles material-component parsing on import. |
 
 ### 2.2 Enumerations
 
 ```python
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, computed_field, field_validator, model_validator, ValidationInfo
 from typing import Literal, Optional, Union
 from enum import Enum
 
 
-class WizardSchool(str, Enum):
+class SpellSchool(str, Enum):
     ABJURATION           = "Abjuration"
     AIR                  = "Air"
     ALCHEMY              = "Alchemy"
@@ -144,13 +148,21 @@ class PriestSphere(str, Enum):
     WEATHER          = "Weather"
 
 
-# Note: The UI treats these Enums as "Suggested" values.
-# The AppConfig stores a `custom_schools` and `custom_spheres` list to extend these.
+# Note: These Enums serve as reference catalogs of canonical values.
+# The model fields use `list[str]` so freeform values are accepted.
+# Unknown values trigger a review flag, not a validation error.
+# The AppConfig stores `custom_schools` and `custom_spheres` lists
+# to remember user-accepted extensions across sessions.
 
 
-class SpellCasterType(str, Enum):
+class ClassList(str, Enum):
     WIZARD  = "Wizard"
     PRIEST  = "Priest"
+
+
+class Tradition(str, Enum):
+    ARCANE = "Arcane"
+    DIVINE = "Divine"
 
 
 class Component(str, Enum):
@@ -171,26 +183,31 @@ SpellLevel = int
 class Spell(BaseModel):
     # ── Identity ──────────────────────────────────────────────────────────
     name: str
-    caster_type: SpellCasterType
+    class_list: ClassList
     level: SpellLevel
 
-    # Exactly one of these is populated; the other is None (enforced by model_validator)
-    school: Optional[WizardSchool] = None   # Wizard spells only
-    sphere: Optional[PriestSphere] = None   # Priest spells only
+    # Tradition is derived from class_list (Wizard → Arcane, Priest → Divine)
+    @computed_field
+    @property
+    def tradition(self) -> Tradition:
+        return Tradition.ARCANE if self.class_list == ClassList.WIZARD else Tradition.DIVINE
+
+    # School is always populated (list of one or more); sphere is Priest-only (list of one or more)
+    # Values are strings — SpellSchool/PriestSphere enums are canonical but freeform is accepted
+    school: list[str]                        # one or more schools; both Wizard and Priest spells list schools
+    sphere: Optional[list[str]] = None       # Priest spells only; one or more spheres
 
     # ── Stat block fields ─────────────────────────────────────────────────
     range: str                       # e.g. "0", "Touch", "30 yds", "10 yds/level", "Special"
     components: list[Component]
-    material_component: Optional[str] = None   # described if M is present
     duration: str                    # e.g. "1 rd/level", "Permanent", "Special"
     casting_time: str                # e.g. "1", "3", "1 rd", "1 turn", "Special"
     area_of_effect: str              # e.g. "One creature", "30-ft. radius", "Special"
     saving_throw: str                # e.g. "None", "Neg.", "½", "Special"
 
     # ── Description ───────────────────────────────────────────────────────
-    description: str                 # full spell description, plain text
+    description: str                 # full spell description, plain text (material components are described here)
     reversible: bool = False         # True if spell has a reversed form
-    reversed_name: Optional[str] = None
 
     # ── Source tracking ───────────────────────────────────────────────────
     source_document: str             # e.g. "Player's Handbook", "Tome of Magic"
@@ -200,6 +217,8 @@ class Spell(BaseModel):
     confidence: float = 1.0          # 0.0–1.0; populated by extraction pipeline
     needs_review: bool = False
     review_notes: Optional[str] = None
+    extraction_start_line: int = -1  # markdown line index for UI highlighting
+    extraction_end_line: int = -1    # markdown line index for UI highlighting
 
     # ── Validators ────────────────────────────────────────────────────────
 
@@ -226,35 +245,44 @@ class Spell(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def validate_school_sphere_exclusivity(self) -> "Spell":
-        """Enforce that wizard spells have school and priest spells have sphere."""
-        if self.caster_type == SpellCasterType.WIZARD:
-            if self.school is None:
-                raise ValueError("Wizard spells must have a school.")
-            if self.sphere is not None:
-                raise ValueError("Wizard spells must not have a sphere.")
-        elif self.caster_type == SpellCasterType.PRIEST:
-            if self.sphere is None:
-                raise ValueError("Priest spells must have a sphere.")
-            if self.school is not None:
-                raise ValueError("Priest spells must not have a school.")
+    def validate_school_sphere(self) -> "Spell":
+        """Enforce that all spells have at least one school, and only Priest spells have sphere."""
+        if not self.school:
+            raise ValueError("All spells must have at least one school.")
+        if self.class_list == ClassList.WIZARD and self.sphere is not None:
+            raise ValueError("Wizard spells must not have a sphere.")
+        if self.class_list == ClassList.PRIEST and (self.sphere is None or len(self.sphere) == 0):
+            raise ValueError("Priest spells must have at least one sphere.")
+        return self
+
+    @model_validator(mode="after")
+    def flag_unknown_school_sphere(self, info: ValidationInfo) -> "Spell":
+        """Flag spells with non-canonical school or sphere values for review."""
+        context = info.context or {}
+        custom_schools = set(context.get("custom_schools", []))
+        custom_spheres = set(context.get("custom_spheres", []))
+        
+        known_schools = {e.value for e in SpellSchool} | custom_schools
+        known_spheres = {e.value for e in PriestSphere} | custom_spheres
+        unknown_schools = [s for s in self.school if s not in known_schools]
+        unknown_spheres = [s for s in (self.sphere or []) if s not in known_spheres]
+        if unknown_schools or unknown_spheres:
+            self.needs_review = True
+            parts = []
+            if unknown_schools:
+                parts.append(f"Unknown school(s): {', '.join(unknown_schools)}")
+            if unknown_spheres:
+                parts.append(f"Unknown sphere(s): {', '.join(unknown_spheres)}")
+            self.review_notes = (self.review_notes or "") + "; ".join(parts) + ". "
         return self
 
     @model_validator(mode="after")
     def validate_level_range_by_type(self) -> "Spell":
         """Enforce per-caster level ranges: Wizard 0–9, Priest 1–8."""
-        if self.caster_type == SpellCasterType.WIZARD and not (0 <= self.level <= 9):
+        if self.class_list == ClassList.WIZARD and not (0 <= self.level <= 9):
             raise ValueError(f"Wizard spell level must be 0–9, got {self.level}")
-        if self.caster_type == SpellCasterType.PRIEST and not (1 <= self.level <= 8):
+        if self.class_list == ClassList.PRIEST and not (1 <= self.level <= 8):
             raise ValueError(f"Priest spell level must be 1–8 (8 = Quest), got {self.level}")
-        return self
-
-    @model_validator(mode="after")
-    def flag_missing_reversed_name(self) -> "Spell":
-        """If reversible but no reversed name, flag for review."""
-        if self.reversible and not self.reversed_name:
-            self.needs_review = True
-            self.review_notes = (self.review_notes or "") + "Reversible spell but no reversed name found. "
         return self
 ```
 
@@ -268,25 +296,25 @@ class LaxSpell(BaseModel):
     Ensures partial LLM output is always captured for human review."""
 
     name: Optional[str] = None
-    caster_type: Optional[str] = None
+    class_list: Optional[str] = None
     level: Optional[str] = None
-    school: Optional[str] = None
-    sphere: Optional[str] = None
+    school: Optional[list[str]] = None
+    sphere: Optional[list[str]] = None
     range: Optional[str] = None
     components: Optional[list[str]] = None
-    material_component: Optional[str] = None
     duration: Optional[str] = None
     casting_time: Optional[str] = None
     area_of_effect: Optional[str] = None
     saving_throw: Optional[str] = None
     description: Optional[str] = None
     reversible: Optional[bool] = None
-    reversed_name: Optional[str] = None
     source_document: Optional[str] = None
     source_page: Optional[int] = None
     confidence: Optional[float] = None
     needs_review: Optional[bool] = None
     review_notes: Optional[str] = None
+    extraction_start_line: Optional[int] = None
+    extraction_end_line: Optional[int] = None
 ```
 
 **Conversion flow** (`LaxSpell → Spell`):
@@ -298,7 +326,9 @@ class LaxSpell(BaseModel):
    - `confidence = 0.0`
    - `needs_review = True`
    - `review_notes` populated with the Pydantic `ValidationError` messages
-   - All parseable fields carried over; unparseable fields filled with sensible defaults (empty string, `False`, etc.)
+   - All parseable fields carried over; unparseable fields filled with sensible defaults:
+     - `school` → `["Unknown"]`, `sphere` → `["Unknown"]` (Priest) or `None` (Wizard)
+     - String fields → `""`, booleans → `False`, `class_list` → `ClassList.WIZARD`
    - Routed directly to the review queue so the user can fix fields in the Review Panel.
 
 This ensures that even after 3 failed Instructor retries, the user always gets **something** to work with rather than a silent data loss.
@@ -309,19 +339,31 @@ Include this in the Stage 2 extraction system prompt so Claude knows how to hand
 
 ```
 Level normalisation:
+- If the level is missing from the stat block (common in the Player's Handbook), infer the level and class list from the `<context_heading>` XML tag provided in the prompt.
 - If the source text shows "Cantrip" for a Wizard spell, output level: 0
 - If the source text shows "Quest" for a Priest spell, output level: 8
 - Otherwise output level as an integer
 
-School vs Sphere:
-- Populate "school" for Wizard spells; leave "sphere" null
-- Populate "sphere" for Priest spells; leave "school" null
+Class list:
+- Set "class_list" to "Wizard" or "Priest" based on the source
+- Do NOT output a "tradition" field — it is computed automatically from class_list
+
+School and Sphere:
+- "school" is a list of one or more schools — a spell can belong to multiple schools
+- Always populate "school" for both Wizard and Priest spells
+- "sphere" is a list of one or more spheres — a Priest spell can belong to multiple spheres
+- Populate "sphere" only for Priest spells; leave "sphere" null for Wizard spells
 - Combined schools (e.g. "Invocation/Evocation") are a single valid school value — do not split
 
-Valid wizard schools: Abjuration, Alteration, Calling, Charm, Conjuration,
-  Conjuration/Summoning, Creation, Dimension, Divination, Enchantment,
-  Enchantment/Charm, Evocation, Illusion, Illusion/Phantasm, Invocation,
-  Invocation/Evocation, Necromancy, Phantasm, Shadow, Summoning, Teleportation, Temporal
+Material components:
+- Do NOT parse material components into a separate field
+- Material component details should remain in the spell description text
+
+Valid wizard schools: Abjuration, Air, Alchemy, Alteration, Artifice, Calling, Charm,
+  Conjuration, Conjuration/Summoning, Creation, Dimension, Divination, Earth,
+  Enchantment, Enchantment/Charm, Evocation, Fire, Force, Geometry, Illusion,
+  Illusion/Phantasm, Invocation, Invocation/Evocation, Necromancy, Phantasm,
+  Shadow, Summoning, Teleportation, Temporal, Water, Wild Magic, Universal
 
 Valid priest spheres: All, Animal, Astral, Chaos, Charm, Combat, Creation, Desert,
   Destiny, Divination, Drow, Elemental Air, Elemental Earth, Elemental Fire,
@@ -331,10 +373,10 @@ Valid priest spheres: All, Animal, Astral, Chaos, Charm, Combat, Creation, Deser
 ```
 
 **Serialization rules**:
-- JSON export omits `confidence`, `needs_review`, `review_notes`.
+- JSON export omits `confidence`, `needs_review`, `review_notes`, `extraction_start_line`, `extraction_end_line`.
 - Markdown export renders each spell as a structured block (see §7).
-- The `school` key is omitted from Priest spell JSON; the `sphere` key is omitted from Wizard spell JSON.
-- Internal storage uses a **Session Persistence** model keyed by the **SHA-256 hash** of the source file. Progress is auto-saved to `~/.spellscribe/session.json`. The session stores extracted `Spell` objects and the intermediate **Markdown** text (to avoid re-running OCR) but regenerates physical coordinates on load.
+- The `sphere` key is omitted from Wizard spell JSON.
+- Internal storage uses a **Session Persistence** model keyed by the **SHA-256 hash** of the source file. Progress is auto-saved to `~/.spellscribe/session.json`. The session stores extracted `Spell` objects and the fully-populated `CoordinateAwareTextMap`. This ensures that bounding boxes and text offsets are instantly restored without re-running any extraction or layout logic.
 - **Single session at a time**: Only one document's extraction state is active. Opening a new file while a session exists prompts: *"You have unsaved work on [filename]. Export first, discard, or cancel?"* The session is cleared only when the user explicitly discards it or opens a new file and confirms. Export does **not** auto-clear the session (the user may want to re-export or continue reviewing).
 
 ### 2.6 Coordinate-aware text mapping
@@ -377,7 +419,7 @@ class CoordinateAwareTextMap:
 | pytesseract (fallback OCR) | Populated from Tesseract's `image_to_data()` output | `None` | Row-level bounding boxes |
 | docx2python (DOCX) | `None` | Populated by tracking character offsets during conversion | UI uses `QTextCursor` with offsets instead of graphical overlay |
 
-**Session persistence note**: `CoordinateAwareTextMap` is **not** serialized to `session.json`. The intermediate Markdown text is stored, and coordinates are regenerated on session load by re-running the lightweight coordinate-extraction pass (no OCR or LLM calls needed).
+**Session persistence note**: The `CoordinateAwareTextMap` must be serialized in full to `session.json`. Because bounding boxes for scanned PDFs are deeply coupled with the initial ingestion pass (e.g. Surya), saving them directly makes session recovery instantaneous and skips all heavy reprocessing.
 
 ---
 
@@ -435,7 +477,7 @@ def route_document(path: str) -> CoordinateAwareTextMap:
 - If `.pdf`:
   - Open with `fitz.open(path)`.
   - For each page, compute `text_ratio = len(page.get_text()) / page.rect.area`.
-  - If `text_ratio < 0.001` OR any embedded image covers >50% of the page area → mark as **scanned**.
+  - If `text_ratio < 0.005` → mark as **scanned** (note: do NOT use image coverage percentages or textured background images will trigger false-positives on digital PDFs; users can apply the "Force" OCR setting if an invisible Acrobat text layer is unusable).
   - Digital pages: convert with `pymupdf4llm.to_markdown(doc, pages=[n])`.
   - Scanned pages: pass through `marker-pdf` (if GPU available) or `pytesseract` to get layout-aware Markdown.
 - **Coordination**: Every ingestion method must return a `CoordinateAwareTextMap` (see §2.6). This object links every line of Markdown back to its physical source location via `TextRegion` objects (PDF: `(x0, y0, x1, y1)` bounding box; DOCX: `(start, end)` character offsets).
@@ -449,22 +491,29 @@ For each page of Markdown, send a **boundary detection** request using the model
 **System prompt** (enable [Anthropic prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) via `cache_control: {"type": "ephemeral"}` — reused across all pages):
 ```
 You are a parser for Advanced Dungeons & Dragons 2nd Edition spell books.
-Your task is to identify where each spell begins on a page.
-Return ONLY a JSON array. No prose, no markdown fences.
+Your task is to identify where each spell begins on a page, and what the current chapter/section heading is (e.g. "First-Level Spells" or "Third-Level Priest Spells").
+Return ONLY a JSON block. No prose, no markdown fences.
 ```
 
 **User message**:
 ```xml
 <page_number>{n}</page_number>
 <page_text>
-{markdown_text}
+{numbered_markdown_text}
 </page_text>
 
-Return a JSON array of objects: [{"spell_name": "...", "start_line": N}]
-If no spells are found on this page, return [].
+Return a JSON object in this exact format:
+{
+  "active_heading": "The current section/level heading affecting these spells (or null if none exists on this page)",
+  "end_of_spells_section": false, // set to true if the page clearly transitions OUT of a spell listing into another major topic (e.g., gap between Wizard and Priest chapters, or End of Book)
+  "spells": [
+    {"spell_name": "...", "start_line": "042"}
+  ]
+}
+If no spells are found, return the heading (if one exists) and an empty array.
 ```
 
-Parse the response with `json.loads`. If it fails, skip this page and log a warning.
+**Implementation Note:** To prevent LLM counting hallucinations, the script MUST preprocess the Markdown string and prefix every line with its absolute 0-indexed line number (e.g. `042: **Magic Missile** (Evocation)`). The AI will then return the exact parsed prefix ID rather than attempting to count newlines. Parse the response with `json.loads`. The `ExtractionWorker` maintains the `active_heading` sequentially. If a page returns a non-null `active_heading`, update the worker's running state. If `end_of_spells_section` is true, the worker immediately closes the currently pending spell (preventing it from gobbling up gap pages) and simply waits until the next valid spell boundary is found. This state is passed to Stage 2 to provide missing level/class context.
 
 ### 4.3 Per-spell extraction (Stage 2 LLM call)
 
@@ -480,17 +529,22 @@ Extract all fields from the spell text provided. Return a single Spell object.
 AD&D 2e spell blocks have this structure:
 - Spell Name (bold, at the top)
 - School/Sphere line: "School: Alteration" or "Sphere: Healing"
+  A spell can list multiple schools, e.g. "(Abjuration, Evocation)" — capture all of them.
 - Level line: "Level: 3" or "Wizard 3" or "Priest 2"
 - Range, Components, Duration, Casting Time, Area of Effect, Saving Throw
   (each on its own line, label in bold or followed by a colon)
 - A blank line, then the full description paragraph(s)
 
 Rules:
-- A "Sphere:" label in the source text indicates a Priest spell — populate the `sphere` field (not `school`).
-- If the spell is reversible, set reversible=true and capture the reversed form name.
-- Material component text appears in the description after the "M" component is listed.
+- Set "class_list" to "Wizard" or "Priest". Do NOT output "tradition" — it is computed automatically.
+- A "Sphere:" label in the source text indicates a Priest spell — populate the `sphere` field.
+  Priest spells also list one or more schools for reference (e.g. spell resistance interactions).
+- "school" is always a list, even if there is only one school.
+- "sphere" is always a list, even if there is only one sphere.
+- If the spell is reversible, set reversible=true.
+- Do NOT extract material components into a separate field. Leave them in the description.
 - Set confidence to a float between 0.0 and 1.0 reflecting your certainty.
-  Set needs_review=true if confidence < 0.85 or any field is ambiguous.
+- Set needs_review=true if any field is ambiguous or you are unsure.
 - source_document and source_page are provided to you; copy them verbatim.
 
 <few_shot_examples>
@@ -502,6 +556,7 @@ Rules:
 ```xml
 <source_document>{doc_name}</source_document>
 <source_page>{page_num}</source_page>          <!-- book page = pdf_page + offset -->
+<context_heading>{active_heading}</context_heading> <!-- from Stage 1 sequential state -->
 <spell_text>
 {cropped_markdown}
 </spell_text>
@@ -509,18 +564,18 @@ Rules:
 
 - **Sequential Discovery, Parallel Extraction**:
   - **Stage 1 (Discovery)**: A worker processes pages sequentially to build a manifest of spell boundaries. It only considers a spell "Ready for Stage 2" once the *next* spell's start point is found (ensuring page-spanning descriptions are captured) or the file ends.
-  - **Stage 2 (Extraction)**: "Ready" spells are pushed to a parallel queue (capped at `AppConfig.max_concurrent_extractions`). Use exponential backoff for rate limits.
+  - **Stage 2 (Extraction)**: "Ready" spells are pushed to a parallel queue (capped at `AppConfig.max_concurrent_extractions`). Rely on the Anthropic SDK's native `max_retries` configuration to handle rate limits automatically rather than writing custom backoff logic.
 - **Lax Model**: Extraction first uses a `LaxSpell` model where all fields are optional strings. This ensures Claude can return "broken" or partially parsed data for manual review rather than failing the entire call on a minor schema violation.
-- **Reversible Cloning**: If "Explode Reversible" is enabled, the application logic (not the LLM) creates a clone of the `Spell` object, using the `reversed_name` as the primary key for the second entry. If `reversed_name` is `None`, the spell is **not** cloned and is routed to the review queue instead (the `flag_missing_reversed_name` validator in §2.3 ensures `needs_review` is already set).
 - On `ValidationError`, Instructor will automatically retry up to 3 times feeding the error back into the conversation.
 
 ### 4.4 Post-extraction routing
 
 ```python
-CONFIDENCE_THRESHOLD = 0.85   # configurable in AppConfig
+# confidence_threshold is configured in AppConfig (e.g., 0.85)
 
 for spell in extracted_spells:
-    if spell.confidence < CONFIDENCE_THRESHOLD or spell.needs_review:
+    if spell.confidence < config.confidence_threshold or spell.needs_review:
+        spell.needs_review = True
         send_to_review_queue(spell)
     else:
         add_to_confirmed_list(spell)
@@ -572,7 +627,7 @@ Three-panel layout using `QSplitter`:
 - **Duplicate Indicator**: Spells with a naming conflict in the Confirmed list show a red overlap icon.
 - Single-click selects a spell and updates the Review Panel and Document Panel highlight.
 - Right-click context menu: **Move to Confirmed**, **Delete**, **Re-extract** (re-runs Stage 2 for this spell's page region).
-- Shows spell name + level label + school/sphere as a two-line list item. Level label reads "Cantrip" when level = 0 (Wizard) or "Quest" when level = 8 (Priest); otherwise shows the integer.
+- Shows spell name + level label + school/sphere as a two-line list item. Level label reads "Cantrip" when level = 0 (Wizard) or "Quest" when level = 8 (Priest); otherwise shows the integer. Schools and spheres are displayed comma-separated when multiple.
 
 ### 5.4 Review / Edit Panel (`review_panel.py`)
 
@@ -580,18 +635,18 @@ Displays a form bound to the currently selected `Spell` object. All fields are e
 
 ```
 Spell Name:     [_______________________________]
-Caster Type:    ( Wizard )  ( Priest )
-School:         [dropdown — WizardSchool values]   ← visible only when Wizard
-Sphere:         [dropdown — PriestSphere values]   ← visible only when Priest
+Class List:     ( Wizard )  ( Priest )
+Tradition:      [label: ARCANE/DIVINE — computed from Class List, read-only]
+School:         [editable multi-select — SpellSchool values + freeform]   ← always visible; one or more
+Sphere:         [editable multi-select — PriestSphere values + freeform]   ← visible only when Priest; one or more
 Level:          [spinbox 0–9]  [label: "Cantrip" if 0+Wizard | "Quest" if 8+Priest]
 Range:          [________________________]
 Components:     [x] V  [x] S  [ ] M
-  Material:     [________________________]   (shown only if M checked)
 Duration:       [________________________]
 Casting Time:   [________________________]
 Area of Effect: [________________________]
 Saving Throw:   [________________________]
-Reversible:     [ ] Yes   Reversed name: [________________]
+Reversible:     [ ] Yes
 Source Doc:     [________________________]
 Source Page:    [spinbox] (Book p.131) | [label: PDF p.140]   ← book page is editable; PDF page derived from offset
                 [Go to Start] [Go to End]   ← Only for page-spanning spells
@@ -606,12 +661,13 @@ Confidence:     0.73  ⚠ Needs review
 [ Accept & Move to Confirmed ]   [ Delete ]   [ Re-extract ]
 ```
 
-- When **Caster Type** is toggled, the School/Sphere row swaps the visible dropdown and clears the hidden field on the model.
+- When **Class List** is toggled, the Tradition label updates automatically (Wizard→ARCANE, Priest→DIVINE), the Sphere row visibility toggles, and the hidden field is cleared on the model.
+- The School and Sphere multi-selects are editable combo-lists: canonical enum values are offered as suggestions, but the user can type freeform values. Non-canonical values are shown with an amber indicator and auto-added to `AppConfig.custom_schools` / `custom_spheres` so they appear as suggestions in future sessions.
 - The level spinbox range adjusts: Wizard allows 0–9; Priest allows 1–8.
 - **Real-time Validation**: On every edit, the form runs `Spell.model_validate()` in its strict mode.
 - **Guided UI**: Fields with validation errors are highlighted with **red borders** and a descriptive tooltip (from Pydantic's `loc` and `msg`).
-- **Conflict Management**: Clicking **Accept** checks for existing `name` + `caster_type` duplicates in the Confirmed list. If found, a dialog offers **Over-write**, **Keep Both**, or **Skip**.
-- **Guided Re-extract**: Clicking **Re-extract** prompts for a "Focus area" string (e.g. "Duration is wrong") which is injected into the Stage 2 prompt as `<user_correction>`.
+- **Conflict Management**: Clicking **Accept** checks for existing `name` + `class_list` duplicates in the Confirmed list. If found, a dialog offers **Over-write**, **Keep Both**, or **Skip**.
+- **Guided Re-extract**: Clicking **Re-extract** prompts for a "Focus area" string (e.g. "Duration is wrong") which is injected into the Stage 2 prompt as `<user_correction>`. Crucially, to mitigate the risk that Stage 1 truncated the target data, the Re-extract action expands the text slice pulled from the `CoordinateAwareTextMap` with a ±20 line safety buffer in both directions before sending it to Stage 2.
 - The **Accept** button is disabled until all strict validation errors are resolved.
 
 ### 5.5 Settings Dialog
@@ -624,7 +680,6 @@ Stage 1 Model:           [dropdown: claude-haiku-4-5-latest ▾]  (boundary dete
 Stage 2 Model:           [dropdown: claude-sonnet-4-latest ▾]   (spell extraction)
 Max Parallel Extractions:[spinbox 1–20, default 5]               (concurrent Stage 2 calls)
 OCR Engine:              (Auto-detect) (Marker/GPU) (Tesseract/CPU)
-Explode Reversible:      [x] Create separate entries for reversed spells
 Confidence Threshold:    [slider 0.5–1.0, default 0.85]
 Default Export Directory:[_____________________________]  [Browse]
 Tesseract Path:          [_____________________________]  (auto-detected)
@@ -648,20 +703,20 @@ Model dropdowns offer `claude-haiku-4-5-latest`, `claude-sonnet-4-latest`, and `
 ### 6.1 JSON export
 
 ```python
-ALWAYS_EXCLUDE = {"confidence", "needs_review", "review_notes"}
+ALWAYS_EXCLUDE = {"confidence", "needs_review", "review_notes", "extraction_start_line", "extraction_end_line"}
 
 def to_json(spells: list[Spell], path: str) -> None:
     """
     Export confirmed spells only (needs_review=False).
     Omit: confidence, needs_review, review_notes.
-    Omit: school for Priest spells, sphere for Wizard spells.
+    Omit: sphere for Wizard spells.
     """
     data = []
     for s in spells:
         if s.needs_review:
             continue
         exclude = ALWAYS_EXCLUDE | (
-            {"sphere"} if s.caster_type == SpellCasterType.WIZARD else {"school"}
+            {"sphere"} if s.class_list == ClassList.WIZARD else set()
         )
         data.append(s.model_dump(exclude=exclude))
     with open(path, "w", encoding="utf-8") as f:
@@ -675,37 +730,36 @@ Output structure (Wizard spell example):
   "spells": [
     {
       "name": "Magic Missile",
-      "caster_type": "Wizard",
-      "school": "Invocation/Evocation",
+      "class_list": "Wizard",
+      "tradition": "Arcane",
+      "school": ["Evocation"],
       "level": 1,
       "range": "60 yds + 10 yds/level",
       "components": ["V", "S"],
-      "material_component": null,
       "duration": "Instantaneous",
       "casting_time": "1",
       "area_of_effect": "1–5 targets",
       "saving_throw": "None",
       "description": "Use of the magic missile spell ...",
       "reversible": false,
-      "reversed_name": null,
       "source_document": "Player's Handbook",
       "source_page": 140
     },
     {
       "name": "Cure Light Wounds",
-      "caster_type": "Priest",
-      "sphere": "Healing",
+      "class_list": "Priest",
+      "tradition": "Divine",
+      "school": ["Necromancy"],
+      "sphere": ["Healing"],
       "level": 1,
       "range": "Touch",
       "components": ["V", "S"],
-      "material_component": null,
       "duration": "Permanent",
       "casting_time": "5",
       "area_of_effect": "Creature touched",
       "saving_throw": "None",
       "description": "When casting this spell ...",
       "reversible": true,
-      "reversed_name": "Cause Light Wounds",
       "source_document": "Player's Handbook",
       "source_page": 257
     }
@@ -720,12 +774,12 @@ Use **Jinja2** with the template at `resources/templates/spell.md.j2`:
 ```jinja2
 ## {{ spell.name }}{% if spell.reversible %} *(Reversible)*{% endif %}
 
-{% if spell.school %}**School:** {{ spell.school }}{% else %}**Sphere:** {{ spell.sphere }}{% endif %} | **Level:** {{ spell.caster_type }} {{ spell.level }}
+**School:** {{ spell.school | join(", ") }}{% if spell.sphere %} | **Sphere:** {{ spell.sphere | join(", ") }}{% endif %} | **Level:** {{ spell.class_list }} {{ spell.level }} | **Tradition:** {{ spell.tradition }}
 
 | Field | Value |
 |---|---|
 | Range | {{ spell.range }} |
-| Components | {{ spell.components | join(", ") }}{% if "M" in spell.components %} *({{ spell.material_component }})*{% endif %} |
+| Components | {{ spell.components | join(", ") }} |
 | Duration | {{ spell.duration }} |
 | Casting Time | {{ spell.casting_time }} |
 | Area of Effect | {{ spell.area_of_effect }} |
@@ -733,9 +787,6 @@ Use **Jinja2** with the template at `resources/templates/spell.md.j2`:
 
 {{ spell.description }}
 
-{% if spell.reversible %}
-**Reversed form:** {{ spell.reversed_name }}
-{% endif %}
 
 *Source: {{ spell.source_document }}{% if spell.source_page %}, p. {{ spell.source_page }}{% endif %}*
 
@@ -801,8 +852,7 @@ The API key is stored in plaintext in the user's home directory. For a hobby too
     "input": "**Wish** (Conjuration/Summoning)\nLevel: 9\nRange: Unlimited\nComponents: V\nDuration: Special\nCasting Time: Special\nArea of Effect: Special\nSaving Throw: Special\n\nThe wish spell is a more potent version of a limited wish. If it is used to alter reality...",
     "output": {
       "name": "Wish",
-      "Spell_list": "Wizard",
-      "tradition": "ARCANE",
+      "class_list": "Wizard",
       "school": ["Conjuration/Summoning"],
       "level": 9,
       "range": "Special",
@@ -824,7 +874,6 @@ The API key is stored in plaintext in the user's home directory. For a hobby too
     "output": {
       "name": "Magic Missile",
       "class_list": "Wizard",
-      "tradition": "ARCANE",
       "school": ["Evocation"],
       "level": 1,
       "range": "60 yds + 10 yds/level",
@@ -846,7 +895,6 @@ The API key is stored in plaintext in the user's home directory. For a hobby too
     "output": {
       "name": "Alarm",
       "class_list": "Wizard",
-      "tradition": "ARCANE",
       "school": ["Abjuration", "Evocation", "Geometry"],
       "level": 1,
       "range": "10 yds.",
@@ -868,9 +916,8 @@ The API key is stored in plaintext in the user's home directory. For a hobby too
     "output": {
       "name": "Sanctuary",
       "class_list": "Priest",
-      "tradition": "DIVINE",
       "school": ["Abjuration"],
-      "sphere":"Protection",
+      "sphere": ["Protection"],
       "level": 1,
       "range": "Touch",
       "components": ["V", "S", "M"],
@@ -891,9 +938,8 @@ The API key is stored in plaintext in the user's home directory. For a hobby too
     "output": {
       "name": "Remove Fear",
       "class_list": "Priest",
-      "tradition": "DIVINE",
       "school": ["Abjuration"],
-      "sphere": "Charm",
+      "sphere": ["Charm"],
       "level": 1,
       "range": "10 yds.",
       "components": ["V", "S"],
@@ -912,7 +958,7 @@ The API key is stored in plaintext in the user's home directory. For a hobby too
 ]
 ```
 
-Include examples that cover: (a) a reversible spell, (b) a spell with a material component, (c) a Priest spell with a sphere, (d) a spell with "Special" in multiple fields.
+Include examples that cover: (a) a reversible spell, (b) a spell with material components in the description, (c) a Priest spell with sphere and school, (d) a spell with "Special" in multiple fields, (e) a Wizard spell with multiple schools.
 
 ---
 
@@ -921,14 +967,14 @@ Include examples that cover: (a) a reversible spell, (b) a spell with a material
 | Error | Handling |
 |---|---|
 | API key missing or invalid | Show a modal dialog prompting the user to open Settings. Block extraction until resolved. |
-| Anthropic API rate limit (429) | Exponential backoff: wait 2, 4, 8 seconds, then surface error with "Retry" button. |
+| Anthropic API rate limit (429) | Handled natively by Anthropic SDK `max_retries` limit. Only surface a fatal error with a "Retry" button if all automatic retries are exhausted. |
 | Anthropic API error (5xx) | Log full response, surface error message, skip page, continue. |
 | PDF is password-protected | Show dialog: "This PDF is encrypted. Please provide the password or remove protection." |
 | Marker/Surya fails on a page | Fall back to `pytesseract`. Show "OCR Mode: Basic (CPU)" warning in UI and force `needs_review=True` for all spells on that page. |
 | `LaxSpell` extraction fails after 3 Instructor retries (catastrophic — LLM returned unparseable output) | Log the raw response, create a placeholder spell with `confidence=0.0`, `needs_review=True`, `review_notes="Extraction failed: unparseable LLM response"`. Add to review queue. |
 | `LaxSpell.to_spell()` strict validation fails (normal — partial or malformed fields) | Construct a best-effort `Spell` with parseable fields carried over, `confidence=0.0`, `needs_review=True`, and `review_notes` populated with Pydantic `ValidationError` messages (see §2.4). Route to review queue. |
 | File not found or unreadable | Show `QMessageBox.critical` and abort import. |
-| PyInstaller frozen path issues with Tesseract | Auto-detect `sys.frozen` and set `tesseract_cmd` to `sys._MEIPASS + "/tesseract/tesseract.exe"`. |
+| PyInstaller frozen path issues with Tesseract | Auto-detect `sys.frozen` and set `pytesseract.tesseract_cmd = sys._MEIPASS + "/tesseract/tesseract.exe"`. Crucially, you must also set `os.environ["TESSDATA_PREFIX"] = sys._MEIPASS + "/tesseract/tessdata"` or the OCR process will crash on load. |
 
 ---
 
@@ -953,6 +999,10 @@ exe = EXE(a.pure, ..., name='SpellScribe', windowed=True, icon='resources/icon.i
 The application is packaged in two "flavors" to manage binary size:
 - **SpellScribe Standard**: (~150MB) Includes Tesseract CPU OCR.
 - **SpellScribe Pro**: (3GB+) Includes `marker-pdf` with PyTorch and CUDA runtimes.
+
+**Important packaging requirement for the Standard build:** 
+PyInstaller will naturally trace imports and bundle PyTorch into both builds if not strictly prevented. You MUST use a **lazy import** for `marker-pdf` (i.e. importing it only locally inside the extraction function guarded by a `try/except ImportError`). Furthermore, the `spell_scribe_std.spec` file must explicitly exclude the heavy deep-learning stack:
+`excludes=['marker', 'torch', 'torchvision', 'transformers', 'accelerate']`
 
 Build commands:
 ```bat
