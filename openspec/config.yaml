@@ -1,0 +1,44 @@
+schema: spec-driven
+
+# Project content
+content: |
+  A Windows desktop companion application called **SpellScribe** that:
+
+  1. Accepts scanned PDFs or Word `.docx` files containing AD&D 2nd Edition spell descriptions.
+  2. Extracts individual spell stat blocks from those documents using OCR and Claude's API.
+  3. Validates each extracted spell against a strict AD&D 2e schema.
+  4. Presents uncertain or failed extractions in a human-review UI.
+  5. Exports the final collection as **JSON** and/or **Markdown** in a format ready to import into the main application.
+  Tech Stack:
+  | Layer | Library / Tool | Version pin |
+  |---|---|---|
+  | GUI | `PySide6` | `>=6.7` |
+  | PDF ingestion (digital) | `PyMuPDF` + `pymupdf4llm` | latest |
+  | PDF ingestion (scanned) | `marker-pdf` (bundles Surya OCR) | latest |
+  | DOCX ingestion | `docx2python` | `>=3.0` |
+  | LLM client | `anthropic` official SDK | latest |
+  | Structured extraction | `instructor` | latest |
+  | Schema validation | `pydantic` | `>=2.0` |
+  | Offline OCR fallback | `pytesseract` + Tesseract 5.5 binary | bundled |
+  | Image handling | `Pillow` | latest |
+  | Templating (Markdown export) | `jinja2` | latest |
+  | Packaging | `PyInstaller 6.x` + Inno Setup | latest |
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+# Example:
+#   context: |
+#     Tech stack: TypeScript, React, Node.js
+#     We use conventional commits
+#     Domain: e-commerce platform
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
