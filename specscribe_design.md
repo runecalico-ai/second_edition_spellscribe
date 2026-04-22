@@ -48,6 +48,8 @@ pip install pyside6 pymupdf pymupdf4llm marker-pdf docx2python \
 
 Tesseract binary ships **separately** inside the PyInstaller bundle at `./tesseract/tesseract.exe`. At runtime, detect the frozen path and set `pytesseract.pytesseract.tesseract_cmd` accordingly.
 
+For local Windows setup, see [docs/windows-tesseract-setup.md](docs/windows-tesseract-setup.md).
+
 ---
 
 ## 2. Data Model
@@ -263,7 +265,7 @@ class Spell(BaseModel):
         context = info.context or {}
         custom_schools = set(context.get("custom_schools", []))
         custom_spheres = set(context.get("custom_spheres", []))
-        
+
         known_schools = {e.value for e in SpellSchool} | custom_schools
         known_spheres = {e.value for e in PriestSphere} | custom_spheres
         unknown_schools = [s for s in self.school if s not in known_schools]
@@ -1178,7 +1180,7 @@ The application is packaged in two "flavors" to manage binary size:
 - **SpellScribe Standard**: (~150MB) Includes Tesseract CPU OCR.
 - **SpellScribe Pro**: (3GB+) Includes `marker-pdf` with PyTorch and CUDA runtimes.
 
-**Important packaging requirement for the Standard build:** 
+**Important packaging requirement for the Standard build:**
 PyInstaller will naturally trace imports and bundle PyTorch into both builds if not strictly prevented. You MUST use a **lazy import** for `marker-pdf` (i.e. importing it only locally inside the extraction function guarded by a `try/except ImportError`). Furthermore, the `spell_scribe_std.spec` file must explicitly exclude the heavy deep-learning stack:
 `excludes=['marker', 'torch', 'torchvision', 'transformers', 'accelerate']`
 
