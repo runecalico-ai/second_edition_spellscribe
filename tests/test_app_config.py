@@ -176,6 +176,7 @@ class AppConfigPersistenceTests(unittest.TestCase):
                 stage2_model="claude-sonnet-4-latest",
                 custom_schools=["Runecraft", "  ", "Chronomancy"],
                 custom_spheres=["Starlight", ""],
+                document_names_by_sha256={SHA_A.upper(): " Player's Handbook ", "invalid": "Ignored"},
                 document_offsets={SHA_A.upper(): "12", "invalid": 9},
                 force_ocr_by_sha256={SHA_B.upper(): "yes", SHA_C: True, "bad": False},
             )
@@ -185,6 +186,7 @@ class AppConfigPersistenceTests(unittest.TestCase):
 
             self.assertEqual(destination, config_path)
             self.assertEqual(loaded, config.normalized())
+            self.assertEqual(loaded.document_names_by_sha256, {SHA_A: "Player's Handbook"})
             self.assertEqual(loaded.document_offsets, {SHA_A: 12})
             self.assertEqual(loaded.force_ocr_by_sha256, {SHA_B: True, SHA_C: True})
 

@@ -142,6 +142,26 @@ def _coerce_sha_to_int_map(value: Any) -> dict[str, int]:
     return normalized
 
 
+def _coerce_sha_to_non_blank_string_map(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+
+    normalized: dict[str, str] = {}
+    for key, raw_value in value.items():
+        if not isinstance(key, str):
+            continue
+        digest = key.strip().lower()
+        if not _is_sha256_hex(digest):
+            continue
+        if not isinstance(raw_value, str):
+            continue
+        display_name = raw_value.strip()
+        if not display_name:
+            continue
+        normalized[digest] = display_name
+    return normalized
+
+
 def _coerce_bool(value: Any, default: bool = False) -> bool:
     parsed = _parse_optional_bool(value)
     if parsed is None:
@@ -224,6 +244,7 @@ class AppConfig:
     last_import_directory: str = ""
     custom_schools: list[str] = field(default_factory=list)
     custom_spheres: list[str] = field(default_factory=list)
+    document_names_by_sha256: dict[str, str] = field(default_factory=dict)
     document_offsets: dict[str, int] = field(default_factory=dict)
     force_ocr_by_sha256: dict[str, bool] = field(default_factory=dict)
 
@@ -276,6 +297,9 @@ class AppConfig:
             ),
             custom_schools=_coerce_string_list(self.custom_schools),
             custom_spheres=_coerce_string_list(self.custom_spheres),
+            document_names_by_sha256=_coerce_sha_to_non_blank_string_map(
+                self.document_names_by_sha256
+            ),
             document_offsets=_coerce_sha_to_int_map(self.document_offsets),
             force_ocr_by_sha256=_coerce_sha_to_bool_map(self.force_ocr_by_sha256),
         )

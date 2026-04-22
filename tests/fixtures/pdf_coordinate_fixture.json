@@ -1,0 +1,16 @@
+{
+  "markdown_text": "Magic Missile\nRange: 60 yards\n",
+  "lines": [
+    {
+      "text": "Magic Missile",
+      "page": 0,
+      "bbox": [10.0, 20.0, 120.0, 32.0]
+    },
+    {
+      "text": "Range: 60 yards",
+      "page": 0,
+      "bbox": [10.0, 34.0, 170.0, 46.0]
+    }
+  ],
+  "text_ratios": [0.5]
+}
