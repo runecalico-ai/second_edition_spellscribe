@@ -13,6 +13,7 @@ from app.session import (
     SpellRecord,
     SpellRecordStatus,
     load_session_state,
+    restore_session_state_for_source,
     save_session_state,
 )
 
@@ -118,6 +119,57 @@ class SessionStateSerializationTests(unittest.TestCase):
             if loaded is None:
                 self.fail("Expected session state to load from the file that was just saved.")
             self.assertEqual(loaded.model_dump(mode="json"), state.model_dump(mode="json"))
+
+    def test_restore_session_state_for_source_returns_matching_pending_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            session_path = Path(tmp_dir) / "session.json"
+            state = SessionState(
+                source_sha256_hex=SHA_SESSION,
+                last_open_path=r"C:\\tmp\\spellbook.pdf",
+                coordinate_map=CoordinateAwareTextMap(
+                    lines=[
+                        ("Magic Missile", TextRegion(page=0, bbox=(12.0, 20.0, 120.0, 34.0))),
+                        ("Damage", TextRegion(page=0, bbox=(16.0, 38.0, 160.0, 52.0))),
+                    ]
+                ),
+                records=[
+                    SpellRecord(
+                        spell_id="pending-0001",
+                        status=SpellRecordStatus.PENDING_EXTRACTION,
+                        extraction_order=0,
+                        section_order=0,
+                        boundary_start_line=0,
+                        boundary_end_line=2,
+                        context_heading="Wizard Spells",
+                    )
+                ],
+            )
+
+            save_session_state(state, session_path=session_path)
+            restored = restore_session_state_for_source(
+                SHA_SESSION,
+                session_path=session_path,
+            )
+
+            self.assertIsNotNone(restored)
+            if restored is None:
+                self.fail("Expected matching source hash to restore a saved pending session.")
+            self.assertEqual(len(restored.records), 1)
+            self.assertEqual(restored.records[0].status, SpellRecordStatus.PENDING_EXTRACTION)
+            self.assertEqual(restored.records[0].boundary_end_line, 2)
+
+    def test_restore_session_state_for_source_returns_none_for_hash_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            session_path = Path(tmp_dir) / "session.json"
+            state = _build_session_state()
+
+            save_session_state(state, session_path=session_path)
+            restored = restore_session_state_for_source(
+                "0" * 64,
+                session_path=session_path,
+            )
+
+            self.assertIsNone(restored)
 
     def test_load_session_state_returns_none_when_file_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
