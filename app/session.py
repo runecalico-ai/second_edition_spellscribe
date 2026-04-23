@@ -157,6 +157,19 @@ def load_session_state(session_path: str | Path | None = None) -> SessionState |
         return None
 
 
+def restore_session_state_for_source(
+    source_sha256_hex: str,
+    *,
+    session_path: str | Path | None = None,
+) -> SessionState | None:
+    session_state = load_session_state(session_path=session_path)
+    if session_state is None:
+        return None
+    if session_state.source_sha256_hex != source_sha256_hex.strip().lower():
+        return None
+    return session_state
+
+
 def _rename_bad_session_file(session_path: Path) -> None:
     bad_path = _build_quarantine_path(session_path)
     try:

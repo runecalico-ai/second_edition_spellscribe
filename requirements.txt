@@ -1,3 +1,5 @@
+anthropic>=0.52,<1
+keyring>=25.6,<26
 pydantic>=2.13,<3
 pymupdf>=1.26,<2
 pymupdf4llm>=0.2,<1
