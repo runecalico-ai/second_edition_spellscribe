@@ -3474,6 +3474,54 @@ class ReviewFlowServiceTests(unittest.TestCase):
         with self.assertRaises(RecordNotFoundError):
             save_confirmed_changes(session_state, spell_id="missing")
 
+    def test_duplicate_detection_normalizes_extra_internal_spaces_in_confirmed_name(self) -> None:
+        session_state = self._build_review_session()
+        # Confirmed record has extra internal spaces in the name.
+        confirmed_record = session_state.records[1]
+        confirmed_record.canonical_spell = confirmed_record.canonical_spell.model_copy(
+            update={"name": "Magic   Missile"}
+        )
+        # Review record draft uses the canonical single-space spelling.
+        review_record = session_state.records[0]
+        apply_review_edits(
+            review_record,
+            draft_updates={"name": "Magic Missile"},
+            config=AppConfig(),
+        )
+
+        conflict = get_confirmed_save_duplicate_conflict(session_state, spell_id="confirmed-1")
+        accepted = accept_review_record(
+            session_state,
+            spell_id="review-1",
+            duplicate_resolution=DuplicateResolutionStrategy.SKIP,
+        )
+
+        self.assertIsNone(conflict)  # confirmed-1 draft == confirmed-1 canonical (same record excluded)
+        self.assertFalse(accepted)  # review draft collides with the extra-spaced confirmed name
+
+    def test_duplicate_detection_normalizes_mixed_case_in_confirmed_name(self) -> None:
+        session_state = self._build_review_session()
+        # Confirmed record has mixed/uppercase name.
+        confirmed_record = session_state.records[1]
+        confirmed_record.canonical_spell = confirmed_record.canonical_spell.model_copy(
+            update={"name": "MAGIC MISSILE"}
+        )
+        # Review record draft uses the canonical mixed-case spelling.
+        review_record = session_state.records[0]
+        apply_review_edits(
+            review_record,
+            draft_updates={"name": "Magic Missile"},
+            config=AppConfig(),
+        )
+
+        accepted = accept_review_record(
+            session_state,
+            spell_id="review-1",
+            duplicate_resolution=DuplicateResolutionStrategy.SKIP,
+        )
+
+        self.assertFalse(accepted)  # review draft collides with the uppercased confirmed name
+
 
 if __name__ == "__main__":
     unittest.main()
