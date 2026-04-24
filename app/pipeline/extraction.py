@@ -6,6 +6,7 @@ import re
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from enum import Enum
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 from app.config import AppConfig, CREDENTIAL_ACCOUNT_NAME, CREDENTIAL_SERVICE_NAME
-from app.models import CoordinateAwareTextMap
+from app.models import ClassList, CoordinateAwareTextMap, LaxSpell, PriestSphere, Spell, SpellSchool
 from app.pipeline.ingestion import RoutedDocument
 from app.session import (
     SessionState,
@@ -22,6 +23,7 @@ from app.session import (
     restore_session_state_for_source,
     save_session_state,
 )
+from app.utils.review_notes import strip_alt_tags, upsert_alt_tag
 
 
 _FENCED_JSON_RE = re.compile(r"^```(?:json)?\s*(?P<body>.*?)\s*```$", re.DOTALL)
@@ -31,6 +33,13 @@ _STAGE1_SYSTEM_PROMPT = (
     "Your task is to identify where each spell begins on a page, and what the current chapter/section heading is "
     '(e.g. "First-Level Spells" or "Third-Level Priest Spells").\n'
     "Return ONLY a JSON block. No prose, no markdown fences."
+)
+_STAGE2_SYSTEM_PROMPT = (
+    "You are a parser for Advanced Dungeons & Dragons 2nd Edition spell entries.\n"
+    "Extract one spell from the provided excerpt and return ONLY one JSON object.\n"
+    "Do not wrap the response in markdown fences.\n"
+    "If a field is uncertain, return your best effort and set needs_review=true with review_notes.\n"
+    "Use null for unknown optional values."
 )
 
 
@@ -170,6 +179,38 @@ class DiscoveryInterruptedError(RuntimeError):
 
 
 DiscoveryPageCaller = Callable[[DiscoveryPageInput], DiscoveryPageResponse]
+Stage2ResponseLike = LaxSpell | Spell | BaseModel | dict[str, Any]
+Stage2Caller = Callable[["Stage2ExtractionInput"], Stage2ResponseLike]
+
+
+@dataclass(frozen=True)
+class Stage2ExtractionInput:
+    record: SpellRecord
+    source_sha256_hex: str
+    source_path: str
+    boundary_start_line: int
+    boundary_end_line: int
+    context_heading: str | None
+    markdown_excerpt: str
+    focus_prompt: str | None = None
+
+
+class DuplicateResolutionStrategy(str, Enum):
+    OVERWRITE = "overwrite"
+    KEEP_BOTH = "keep_both"
+    SKIP = "skip"
+
+
+class RecordNotFoundError(LookupError):
+    pass
+
+
+class InvalidRecordStateError(ValueError):
+    pass
+
+
+class DuplicateConfirmedSpellError(ValueError):
+    pass
 
 
 def number_markdown_lines(lines: Sequence[str], *, start_line: int) -> str:
@@ -425,6 +466,669 @@ def detect_spells_with_autosave(
 
     save_session_state(discovered_session, session_path=session_path)
     return discovered_session
+
+
+def extract_selected_pending(
+    session_state: SessionState,
+    *,
+    config: AppConfig,
+    stage2_caller: Stage2Caller | None = None,
+) -> SessionState:
+    selected_id = session_state.selected_spell_id
+    if selected_id is None:
+        return session_state
+
+    for record in session_state.records:
+        if record.spell_id != selected_id:
+            continue
+        if record.status != SpellRecordStatus.PENDING_EXTRACTION:
+            return session_state
+        _extract_pending_record(
+            session_state,
+            record=record,
+            config=config,
+            stage2_caller=stage2_caller,
+        )
+        return session_state
+
+    return session_state
+
+
+def extract_all_pending(
+    session_state: SessionState,
+    *,
+    config: AppConfig,
+    stage2_caller: Stage2Caller | None = None,
+) -> SessionState:
+    pending_records = [
+        record for record in session_state.records if record.status == SpellRecordStatus.PENDING_EXTRACTION
+    ]
+    for record in pending_records:
+        _extract_pending_record(
+            session_state,
+            record=record,
+            config=config,
+            stage2_caller=stage2_caller,
+        )
+    return session_state
+
+
+def get_review_draft(record: SpellRecord) -> Spell:
+    """Return the editable draft spell for a review/confirmed record."""
+    if record.draft_spell is not None:
+        return record.draft_spell
+    if record.canonical_spell is None:
+        raise InvalidRecordStateError("record has no canonical_spell to seed a draft")
+    return record.canonical_spell.model_copy(deep=True)
+
+
+def apply_review_edits(
+    record: SpellRecord,
+    *,
+    draft_updates: dict[str, Any],
+    config: AppConfig,
+) -> Spell:
+    """Apply form edits to draft only; canonical data remains unchanged."""
+    base_spell = get_review_draft(record)
+    draft_payload = base_spell.model_dump(mode="json")
+    draft_payload.update(draft_updates)
+    draft_spell = Spell.model_validate(
+        draft_payload,
+        context={
+            "custom_schools": config.custom_schools,
+            "custom_spheres": config.custom_spheres,
+        },
+    )
+    record.draft_spell = draft_spell
+    record.draft_dirty = True
+    return draft_spell
+
+
+def discard_record_draft(record: SpellRecord) -> None:
+    """Discard in-progress edits and reveal canonical data."""
+    record.draft_spell = None
+    record.draft_dirty = False
+
+
+def save_confirmed_changes(
+    session_state: SessionState,
+    *,
+    spell_id: str,
+    config: AppConfig | None = None,
+) -> SpellRecord:
+    """Commit draft edits for a confirmed record; duplicate conflicts block save."""
+    record = _get_record_or_raise(session_state, spell_id=spell_id)
+    if record.status != SpellRecordStatus.CONFIRMED:
+        raise InvalidRecordStateError("Save Changes is only valid for confirmed records")
+    candidate = get_review_draft(record)
+    conflict_record = _find_confirmed_duplicate(
+        session_state,
+        candidate=candidate,
+        excluding_spell_id=record.spell_id,
+    )
+    if conflict_record is not None:
+        raise DuplicateConfirmedSpellError(
+            f"confirmed duplicate conflict with '{conflict_record.spell_id}'"
+        )
+    _commit_spell_to_record(record, candidate, status=SpellRecordStatus.CONFIRMED)
+    if config is not None:
+        _learn_custom_terms_from_spell(config, candidate)
+    return record
+
+
+def get_confirmed_save_duplicate_conflict(
+    session_state: SessionState,
+    *,
+    spell_id: str,
+) -> SpellRecord | None:
+    """Return a conflicting confirmed record for the draft, if any (M-001 preflight).
+
+    UI layers can call this to disable ``Save Changes`` while the draft still collides
+    with another confirmed spell on normalized name and class list.
+    """
+    record = _get_record_or_raise(session_state, spell_id=spell_id)
+    if record.status != SpellRecordStatus.CONFIRMED:
+        return None
+    candidate = get_review_draft(record)
+    return _find_confirmed_duplicate(
+        session_state,
+        candidate=candidate,
+        excluding_spell_id=record.spell_id,
+    )
+
+
+def accept_review_record(
+    session_state: SessionState,
+    *,
+    spell_id: str,
+    duplicate_resolution: DuplicateResolutionStrategy = DuplicateResolutionStrategy.SKIP,
+    config: AppConfig | None = None,
+) -> bool:
+    """
+    Commit review draft and move record to confirmed.
+
+    Returns True when committed; False when duplicate resolution is SKIP.
+    """
+    record = _get_record_or_raise(session_state, spell_id=spell_id)
+    if record.status != SpellRecordStatus.NEEDS_REVIEW:
+        raise InvalidRecordStateError("Accept is only valid for needs_review records")
+
+    candidate = get_review_draft(record)
+    conflict_record = _find_confirmed_duplicate(
+        session_state,
+        candidate=candidate,
+        excluding_spell_id=record.spell_id,
+    )
+    authoritative_candidate = _enforce_authoritative_provenance(
+        session_state,
+        record=record,
+        spell=candidate,
+    )
+
+    if conflict_record is None:
+        _commit_spell_to_record(
+            record,
+            authoritative_candidate,
+            status=SpellRecordStatus.CONFIRMED,
+        )
+        if config is not None:
+            _learn_custom_terms_from_spell(config, authoritative_candidate)
+        return True
+
+    if duplicate_resolution == DuplicateResolutionStrategy.SKIP:
+        return False
+
+    if duplicate_resolution == DuplicateResolutionStrategy.OVERWRITE:
+        delete_record(session_state, spell_id=conflict_record.spell_id)
+        _commit_spell_to_record(
+            record,
+            authoritative_candidate,
+            status=SpellRecordStatus.CONFIRMED,
+        )
+        if config is not None:
+            _learn_custom_terms_from_spell(config, authoritative_candidate)
+        return True
+
+    _commit_spell_to_record(
+        record,
+        authoritative_candidate,
+        status=SpellRecordStatus.CONFIRMED,
+    )
+    if config is not None:
+        _learn_custom_terms_from_spell(config, authoritative_candidate)
+    return True
+
+
+def _learn_custom_terms_from_spell(config: AppConfig, spell: Spell) -> None:
+    known_schools = {school.value.lower() for school in SpellSchool}
+    known_spheres = {sphere.value.lower() for sphere in PriestSphere}
+    placeholder_terms = {"unknown"}
+    _merge_custom_terms(
+        target=config.custom_schools,
+        values=spell.school,
+        known_values=known_schools,
+        blocked_values=placeholder_terms,
+    )
+    _merge_custom_terms(
+        target=config.custom_spheres,
+        values=spell.sphere or [],
+        known_values=known_spheres,
+        blocked_values=placeholder_terms,
+    )
+
+
+def _merge_custom_terms(
+    *,
+    target: list[str],
+    values: list[str],
+    known_values: set[str],
+    blocked_values: set[str] | None = None,
+) -> None:
+    blocked_normalized = blocked_values or set()
+    normalized_target: list[str] = []
+    existing_normalized: set[str] = set()
+    for item in target:
+        normalized_existing = item.strip()
+        if not normalized_existing:
+            continue
+        lowered_existing = normalized_existing.lower()
+        if lowered_existing in existing_normalized or lowered_existing in blocked_normalized:
+            continue
+        normalized_target.append(normalized_existing)
+        existing_normalized.add(lowered_existing)
+
+    for value in values:
+        normalized = value.strip()
+        if not normalized:
+            continue
+        lowered = normalized.lower()
+        if lowered in known_values or lowered in existing_normalized or lowered in blocked_normalized:
+            continue
+        normalized_target.append(normalized)
+        existing_normalized.add(lowered)
+    target[:] = normalized_target
+
+
+def delete_record(session_state: SessionState, *, spell_id: str) -> bool:
+    for index, record in enumerate(session_state.records):
+        if record.spell_id != spell_id:
+            continue
+        del session_state.records[index]
+        if session_state.selected_spell_id == spell_id:
+            session_state.selected_spell_id = None
+        return True
+    return False
+
+
+def reextract_record_into_draft(
+    session_state: SessionState,
+    *,
+    spell_id: str,
+    focus_prompt: str,
+    config: AppConfig,
+    stage2_caller: Stage2Caller | None = None,
+) -> Spell:
+    """Run focused re-extract and merge into draft only."""
+    record = _get_record_or_raise(session_state, spell_id=spell_id)
+    if record.status == SpellRecordStatus.PENDING_EXTRACTION:
+        raise InvalidRecordStateError("Re-extract is only valid for extracted records")
+    if record.canonical_spell is None:
+        raise InvalidRecordStateError("record has no canonical spell to compare against")
+
+    caller = stage2_caller or _build_default_stage2_caller(config)
+    attempts = max(1, int(config.stage2_max_attempts))
+    last_error: Exception | None = None
+    candidate_spell: Spell | None = None
+
+    for _ in range(attempts):
+        try:
+            stage2_input = _build_stage2_input(
+                session_state,
+                record=record,
+                focus_prompt=focus_prompt.strip() or None,
+            )
+            stage2_response = caller(stage2_input)
+            lax_spell = _coerce_stage2_response(stage2_response)
+            candidate_spell = lax_spell.to_spell(
+                custom_schools=config.custom_schools,
+                custom_spheres=config.custom_spheres,
+            )
+            candidate_spell = _enforce_authoritative_provenance(
+                session_state,
+                record=record,
+                spell=candidate_spell,
+            )
+            break
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            last_error = exc
+
+    if candidate_spell is None:
+        raise RuntimeError("Stage 2 re-extract failed") from last_error
+
+    canonical_spell = record.canonical_spell
+    current_draft = get_review_draft(record)
+    merged_spell = _merge_reextract_candidate(
+        canonical_spell=canonical_spell,
+        draft_spell=current_draft,
+        candidate_spell=candidate_spell,
+        config=config,
+    )
+    merged_spell = _enforce_authoritative_provenance(
+        session_state,
+        record=record,
+        spell=merged_spell,
+    )
+    record.draft_spell = merged_spell
+    record.draft_dirty = True
+    return merged_spell
+
+
+def _extract_pending_record(
+    session_state: SessionState,
+    *,
+    record: SpellRecord,
+    config: AppConfig,
+    stage2_caller: Stage2Caller | None,
+) -> None:
+    caller = stage2_caller or _build_default_stage2_caller(config)
+    attempts = max(1, int(config.stage2_max_attempts))
+    last_error: Exception | None = None
+
+    for _ in range(attempts):
+        try:
+            stage2_input = _build_stage2_input(session_state, record=record)
+            stage2_response = caller(stage2_input)
+            lax_spell = _coerce_stage2_response(stage2_response)
+            strict_spell = lax_spell.to_spell(
+                custom_schools=config.custom_schools,
+                custom_spheres=config.custom_spheres,
+            )
+            strict_spell = _enforce_authoritative_provenance(
+                session_state,
+                record=record,
+                spell=strict_spell,
+            )
+            _commit_extracted_spell(
+                record,
+                strict_spell,
+                confidence_threshold=config.confidence_threshold,
+            )
+            return
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            last_error = exc
+
+    fallback_spell = _build_placeholder_spell(
+        session_state,
+        record=record,
+        attempt_count=attempts,
+        last_error=last_error,
+    )
+    _commit_extracted_spell(
+        record,
+        fallback_spell,
+        confidence_threshold=config.confidence_threshold,
+    )
+
+
+def _build_stage2_input(
+    session_state: SessionState,
+    *,
+    record: SpellRecord,
+    focus_prompt: str | None = None,
+) -> Stage2ExtractionInput:
+    return Stage2ExtractionInput(
+        record=record,
+        source_sha256_hex=session_state.source_sha256_hex,
+        source_path=session_state.last_open_path,
+        boundary_start_line=record.boundary_start_line,
+        boundary_end_line=record.boundary_end_line,
+        context_heading=record.context_heading,
+        markdown_excerpt=_record_markdown_excerpt(session_state, record=record),
+        focus_prompt=focus_prompt,
+    )
+
+
+def _record_markdown_excerpt(session_state: SessionState, *, record: SpellRecord) -> str:
+    span = _derive_clamped_record_boundary_span(session_state, record=record)
+    if span is None:
+        return ""
+
+    start, end = span
+    return "\n".join(line for line, _ in session_state.coordinate_map.lines[start:end])
+
+
+def _derive_clamped_record_boundary_span(
+    session_state: SessionState,
+    *,
+    record: SpellRecord,
+) -> tuple[int, int] | None:
+    line_count = len(session_state.coordinate_map.lines)
+    if line_count <= 0:
+        return None
+
+    start_line = max(0, min(record.boundary_start_line, line_count - 1))
+    end_line = record.boundary_end_line
+    if end_line < 0:
+        end_line = line_count
+    else:
+        end_line = min(end_line, line_count)
+    end_line = max(end_line, start_line + 1)
+    return start_line, end_line
+
+
+def _coerce_stage2_response(value: Stage2ResponseLike) -> LaxSpell:
+    if isinstance(value, LaxSpell):
+        return value
+    if isinstance(value, Spell):
+        return LaxSpell.model_validate(value.model_dump(mode="json"))
+    if isinstance(value, BaseModel):
+        return LaxSpell.model_validate(value.model_dump(mode="json"))
+    if isinstance(value, dict):
+        return LaxSpell.model_validate(value)
+    raise TypeError("Stage 2 caller must return LaxSpell, Spell, BaseModel, or dict payload.")
+
+
+def _enforce_authoritative_provenance(
+    session_state: SessionState,
+    *,
+    record: SpellRecord,
+    spell: Spell,
+) -> Spell:
+    source_document = Path(session_state.last_open_path).name or "Unknown source"
+    source_page = _derive_source_page_from_record_boundaries(
+        session_state,
+        record=record,
+    )
+    return spell.model_copy(
+        update={
+            "source_document": source_document,
+            "source_page": source_page,
+            "extraction_start_line": record.boundary_start_line,
+            "extraction_end_line": record.boundary_end_line,
+        }
+    )
+
+
+def _derive_source_page_from_record_boundaries(
+    session_state: SessionState,
+    *,
+    record: SpellRecord,
+) -> int | None:
+    span = _derive_clamped_record_boundary_span(session_state, record=record)
+    if span is None:
+        return None
+
+    start_line, end_line = span
+    try:
+        source_page, _ = session_state.coordinate_map.page_span(start_line, end_line)
+    except ValueError:
+        return None
+    return source_page if source_page >= 0 else None
+
+
+def _infer_placeholder_class_list(*, record: SpellRecord) -> ClassList:
+    heading = (record.context_heading or "").casefold()
+    if not heading:
+        return ClassList.WIZARD
+
+    priest_cues = ("priest", "cleric", "druid")
+    wizard_cues = ("wizard", "mage", "magician", "illusionist")
+    if any(cue in heading for cue in priest_cues):
+        return ClassList.PRIEST
+    if any(cue in heading for cue in wizard_cues):
+        return ClassList.WIZARD
+    return ClassList.WIZARD
+
+
+def _build_placeholder_spell(
+    session_state: SessionState,
+    *,
+    record: SpellRecord,
+    attempt_count: int,
+    last_error: Exception | None,
+) -> Spell:
+    excerpt = _record_markdown_excerpt(session_state, record=record)
+    first_line = next((line.strip() for line in excerpt.splitlines() if line.strip()), "")
+    display_name = first_line or f"Unparsed spell @ line {record.boundary_start_line}"
+    detail = str(last_error) if last_error is not None else "unknown error"
+    review_notes = (
+        f"Stage 2 extraction failed after {attempt_count} attempt(s): {detail}. "
+        "Generated placeholder for manual review."
+    )
+    source_page = _derive_source_page_from_record_boundaries(
+        session_state,
+        record=record,
+    )
+    source_document = Path(session_state.last_open_path).name or "Unknown source"
+    inferred_class_list = _infer_placeholder_class_list(record=record)
+    if inferred_class_list == ClassList.PRIEST:
+        fallback_level = 1
+        fallback_sphere: list[str] | None = ["Unknown"]
+    else:
+        fallback_level = 0
+        fallback_sphere = None
+
+    return Spell.model_validate(
+        {
+            "name": display_name,
+            "class_list": inferred_class_list.value,
+            "level": fallback_level,
+            "school": ["Unknown"],
+            "sphere": fallback_sphere,
+            "range": "",
+            "components": [],
+            "duration": "",
+            "casting_time": "",
+            "area_of_effect": "",
+            "saving_throw": "",
+            "description": excerpt or "No extractable text available for this spell boundary.",
+            "reversible": False,
+            "source_document": source_document,
+            "source_page": source_page,
+            "confidence": 0.0,
+            "needs_review": True,
+            "review_notes": review_notes,
+            "extraction_start_line": record.boundary_start_line,
+            "extraction_end_line": record.boundary_end_line,
+        }
+    )
+
+
+def _commit_extracted_spell(
+    record: SpellRecord,
+    spell: Spell,
+    *,
+    confidence_threshold: float,
+) -> None:
+    should_route_to_review = spell.needs_review or spell.confidence < confidence_threshold
+    _commit_spell_to_record(
+        record,
+        spell,
+        status=(
+            SpellRecordStatus.NEEDS_REVIEW
+            if should_route_to_review
+            else SpellRecordStatus.CONFIRMED
+        ),
+    )
+
+
+def _commit_spell_to_record(
+    record: SpellRecord,
+    spell: Spell,
+    *,
+    status: SpellRecordStatus,
+) -> None:
+    record.canonical_spell = spell
+    record.draft_spell = None
+    record.draft_dirty = False
+    record.status = status
+
+
+def _get_record_or_raise(session_state: SessionState, *, spell_id: str) -> SpellRecord:
+    for record in session_state.records:
+        if record.spell_id == spell_id:
+            return record
+    raise RecordNotFoundError(f"record '{spell_id}' was not found")
+
+
+def _normalized_spell_identity(spell: Spell) -> tuple[str, str]:
+    normalized_name = " ".join(spell.name.strip().lower().split())
+    return (normalized_name, spell.class_list.value.lower())
+
+
+def _find_confirmed_duplicate(
+    session_state: SessionState,
+    *,
+    candidate: Spell,
+    excluding_spell_id: str,
+) -> SpellRecord | None:
+    candidate_identity = _normalized_spell_identity(candidate)
+    for record in session_state.records:
+        if record.spell_id == excluding_spell_id:
+            continue
+        if record.status != SpellRecordStatus.CONFIRMED:
+            continue
+        if record.canonical_spell is None:
+            continue
+        if _normalized_spell_identity(record.canonical_spell) == candidate_identity:
+            return record
+    return None
+
+
+def _merge_reextract_candidate(
+    *,
+    canonical_spell: Spell,
+    draft_spell: Spell,
+    candidate_spell: Spell,
+    config: AppConfig,
+) -> Spell:
+    merged_payload = draft_spell.model_dump(mode="json")
+    merged_notes = strip_alt_tags(draft_spell.review_notes)
+
+    for field_name in Spell.model_fields:
+        if field_name == "review_notes":
+            continue
+        canonical_value = getattr(canonical_spell, field_name)
+        current_draft_value = getattr(draft_spell, field_name)
+        candidate_value = getattr(candidate_spell, field_name)
+
+        if current_draft_value == canonical_value:
+            merged_payload[field_name] = candidate_value
+            continue
+
+        if candidate_value == current_draft_value or candidate_value == canonical_value:
+            merged_payload[field_name] = current_draft_value
+            continue
+
+        merged_payload[field_name] = current_draft_value
+        merged_notes = upsert_alt_tag(
+            merged_notes,
+            field_name,
+            _format_alt_value(candidate_value),
+        )
+
+    merged_payload["review_notes"] = merged_notes or None
+    return Spell.model_validate(
+        merged_payload,
+        context={
+            "custom_schools": config.custom_schools,
+            "custom_spheres": config.custom_spheres,
+        },
+    )
+
+
+def _format_alt_value(value: Any) -> str:
+    if value is None:
+        return "None"
+    if isinstance(value, (list, tuple)):
+        return json.dumps(list(value), ensure_ascii=True)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _build_default_stage2_caller(_config: AppConfig) -> Stage2Caller:
+    anthropic_module = _load_optional_module("anthropic")
+    api_key = _resolve_anthropic_api_key(_config)
+    client = anthropic_module.Anthropic(api_key=api_key)
+
+    def call_stage2(stage2_input: Stage2ExtractionInput) -> Stage2ResponseLike:
+        message = client.messages.create(
+            model=_config.stage2_model,
+            max_tokens=4096,
+            system=[
+                {
+                    "type": "text",
+                    "text": _STAGE2_SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            messages=[{"role": "user", "content": _build_stage2_user_message(stage2_input)}],
+        )
+        response_text = _extract_anthropic_text(message)
+        return parse_stage2_response(response_text)
+
+    return call_stage2
 
 
 def _build_working_session(
@@ -752,7 +1456,48 @@ def _load_optional_module(module_name: str) -> Any:
     try:
         return import_module(module_name)
     except ImportError as exc:
-        raise RuntimeError(f"{module_name} is required for Stage 1 discovery but is not installed.") from exc
+        raise RuntimeError(f"{module_name} is required for extraction but is not installed.") from exc
+
+
+def _build_stage2_user_message(stage2_input: Stage2ExtractionInput) -> str:
+    payload = {
+        "source_sha256_hex": stage2_input.source_sha256_hex,
+        "source_path": stage2_input.source_path,
+        "context_heading": stage2_input.context_heading,
+        "boundary_start_line": stage2_input.boundary_start_line,
+        "boundary_end_line": stage2_input.boundary_end_line,
+        "spell_id": stage2_input.record.spell_id,
+        "focus_prompt": stage2_input.focus_prompt,
+    }
+    metadata_json = json.dumps(payload, ensure_ascii=True)
+    return (
+        "Stage 2 extraction request. Return exactly one JSON object with fields matching the LaxSpell schema.\n"
+        "Schema keys include: name, class_list, level, school, sphere, range, components, duration, "
+        "casting_time, area_of_effect, saving_throw, description, reversible, source_document, source_page, "
+        "confidence, needs_review, review_notes, extraction_start_line, extraction_end_line.\n"
+        "Metadata:\n"
+        f"{metadata_json}\n\n"
+        "Markdown excerpt:\n"
+        f"{stage2_input.markdown_excerpt}"
+    )
+
+
+def parse_stage2_response(raw_response: str) -> LaxSpell:
+    payload_text = raw_response.strip()
+    fenced_match = _FENCED_JSON_RE.match(payload_text)
+    if fenced_match is not None:
+        payload_text = fenced_match.group("body").strip()
+
+    if not payload_text.startswith("{"):
+        start_index = payload_text.find("{")
+        end_index = payload_text.rfind("}")
+        if start_index >= 0 and end_index >= start_index:
+            payload_text = payload_text[start_index : end_index + 1]
+
+    payload = json.loads(payload_text)
+    if not isinstance(payload, dict):
+        raise RuntimeError("Anthropic Stage 2 response must be a JSON object.")
+    return LaxSpell.model_validate(payload)
 
 
 def _coerce_api_key_storage_mode(value: object) -> str:

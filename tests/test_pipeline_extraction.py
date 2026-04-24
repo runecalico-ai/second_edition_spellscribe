@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -10,23 +11,38 @@ from unittest.mock import patch
 from app.config import AppConfig
 from app.models import ClassList, CoordinateAwareTextMap, Spell, TextRegion
 from app.pipeline.extraction import (
+    DuplicateConfirmedSpellError,
+    DuplicateResolutionStrategy,
     DiscoveryInterruptedError,
     DiscoveryPageInput,
     DiscoveryPageResponse,
     DiscoverySpellStart,
+    InvalidRecordStateError,
+    RecordNotFoundError,
+    Stage2ExtractionInput,
     _build_stage1_prompt_from_numbered_page,
     _read_keyring_api_key,
     _resolve_anthropic_api_key,
+    accept_review_record,
+    apply_review_edits,
+    delete_record,
     detect_spells,
     detect_spells_with_autosave,
+    discard_record_draft,
+    extract_all_pending,
+    extract_selected_pending,
+    get_confirmed_save_duplicate_conflict,
     number_markdown_lines,
     open_or_restore_discovery_session,
     parse_discovery_response,
+    reextract_record_into_draft,
     restore_discovery_session,
+    save_confirmed_changes,
 )
 from app.pipeline.identity import DocumentIdentityMetadata
 from app.pipeline.ingestion import RoutedDocument
 from app.session import SessionState, SpellRecord, SpellRecordStatus, load_session_state, save_session_state
+from app.utils.review_notes import parse_alt_tags
 from pydantic import ValidationError
 
 
@@ -2442,6 +2458,911 @@ class DiscoveryPersistenceHelperTests(unittest.TestCase):
             self.assertEqual(len(saved_state.records), 1)
             self.assertEqual(saved_state.records[0].boundary_start_line, 1)
             self.assertEqual(saved_state.records[0].boundary_end_line, 3)
+
+
+class Stage2ExtractionTests(unittest.TestCase):
+    def _build_pending_session(self) -> SessionState:
+        routed_document = _build_routed_document(
+            [["Wizard Spells", "Magic Missile", "Shield", "Range: 60 yards"]]
+        )
+        first_pending_id = f"pending-{SHA_DISCOVERY}-000001"
+        second_pending_id = f"pending-{SHA_DISCOVERY}-000002"
+        return SessionState(
+            source_sha256_hex=SHA_DISCOVERY,
+            last_open_path=str(routed_document.source_path),
+            coordinate_map=routed_document.coordinate_map,
+            records=[
+                SpellRecord(
+                    spell_id=first_pending_id,
+                    status=SpellRecordStatus.PENDING_EXTRACTION,
+                    extraction_order=0,
+                    section_order=0,
+                    boundary_start_line=1,
+                    boundary_end_line=2,
+                    context_heading="Wizard Spells",
+                ),
+                SpellRecord(
+                    spell_id=second_pending_id,
+                    status=SpellRecordStatus.PENDING_EXTRACTION,
+                    extraction_order=1,
+                    section_order=1,
+                    boundary_start_line=2,
+                    boundary_end_line=4,
+                    context_heading="Wizard Spells",
+                ),
+            ],
+            selected_spell_id=first_pending_id,
+        )
+
+    def test_extract_selected_pending_processes_only_selected_record(self) -> None:
+        session_state = self._build_pending_session()
+        selected_record = session_state.records[0]
+        call_spell_ids: list[str] = []
+
+        def stage2_caller(_request: Stage2ExtractionInput) -> dict[str, object]:
+            call_spell_ids.append(_request.record.spell_id)
+            return _spell_payload(
+                name="Magic Missile",
+                level=1,
+                start_line=_request.record.boundary_start_line,
+                end_line=_request.record.boundary_end_line,
+            )
+
+        extract_selected_pending(
+            session_state,
+            config=AppConfig(stage2_max_attempts=2),
+            stage2_caller=stage2_caller,
+        )
+
+        self.assertIs(session_state.records[0], selected_record)
+        self.assertEqual(call_spell_ids, [selected_record.spell_id])
+        self.assertEqual(session_state.records[0].status, SpellRecordStatus.CONFIRMED)
+        self.assertEqual(
+            session_state.records[1].status,
+            SpellRecordStatus.PENDING_EXTRACTION,
+        )
+
+    def test_extract_selected_pending_uses_default_stage2_caller_when_not_injected(self) -> None:
+        session_state = self._build_pending_session()
+        captured_requests: list[dict[str, object]] = []
+        fake_message = SimpleNamespace(
+            content=[
+                {
+                    "text": """{
+                        "name": "Magic Missile",
+                        "class_list": "Wizard",
+                        "level": 1,
+                        "school": ["Evocation"],
+                        "range": "60 yards",
+                        "components": ["V", "S"],
+                        "duration": "1 round",
+                        "casting_time": "1",
+                        "area_of_effect": "1 creature",
+                        "saving_throw": "None",
+                        "description": "A missile of magical energy.",
+                        "source_document": "Player's Handbook",
+                        "source_page": 112,
+                        "confidence": 0.95,
+                        "needs_review": false,
+                        "extraction_start_line": 1,
+                        "extraction_end_line": 2
+                    }"""
+                }
+            ]
+        )
+        fake_client = SimpleNamespace(
+            messages=SimpleNamespace(
+                create=lambda **kwargs: captured_requests.append(kwargs) or fake_message
+            )
+        )
+        fake_anthropic_module = SimpleNamespace(Anthropic=lambda api_key: fake_client)
+
+        with patch(
+            "app.pipeline.extraction._load_optional_module",
+            return_value=fake_anthropic_module,
+        ), patch(
+            "app.pipeline.extraction._resolve_anthropic_api_key",
+            return_value="test-key",
+        ):
+            extract_selected_pending(
+                session_state,
+                config=AppConfig(stage2_max_attempts=1),
+            )
+
+        self.assertEqual(len(captured_requests), 1)
+        request = captured_requests[0]
+        self.assertEqual(request["model"], "claude-sonnet-4-latest")
+        self.assertEqual(session_state.records[0].status, SpellRecordStatus.CONFIRMED)
+        self.assertIsNotNone(session_state.records[0].canonical_spell)
+        if session_state.records[0].canonical_spell is None:
+            self.fail("Expected selected record to be extracted through the default Stage 2 caller.")
+        self.assertEqual(session_state.records[0].canonical_spell.name, "Magic Missile")
+        self.assertEqual(
+            session_state.records[1].status,
+            SpellRecordStatus.PENDING_EXTRACTION,
+        )
+
+    def test_extract_all_pending_processes_remaining_pending_records(self) -> None:
+        session_state = self._build_pending_session()
+        call_spell_ids: list[str] = []
+
+        def stage2_caller(_request: Stage2ExtractionInput) -> dict[str, object]:
+            call_spell_ids.append(_request.record.spell_id)
+            return _spell_payload(
+                name=f"Spell {_request.record.boundary_start_line}",
+                level=1,
+                start_line=_request.record.boundary_start_line,
+                end_line=_request.record.boundary_end_line,
+            )
+
+        extract_all_pending(
+            session_state,
+            config=AppConfig(stage2_max_attempts=2),
+            stage2_caller=stage2_caller,
+        )
+
+        self.assertEqual(len(call_spell_ids), 2)
+        self.assertEqual(call_spell_ids, [record.spell_id for record in session_state.records])
+        self.assertEqual(
+            [record.status for record in session_state.records],
+            [SpellRecordStatus.CONFIRMED, SpellRecordStatus.CONFIRMED],
+        )
+
+    def test_extract_all_pending_uses_default_stage2_caller_when_not_injected(self) -> None:
+        session_state = self._build_pending_session()
+        captured_requests: list[dict[str, object]] = []
+        response_payloads = iter(
+            [
+                {
+                    "name": "Magic Missile",
+                    "class_list": "Wizard",
+                    "level": 1,
+                    "school": ["Evocation"],
+                    "range": "60 yards",
+                    "components": ["V", "S"],
+                    "duration": "1 round",
+                    "casting_time": "1",
+                    "area_of_effect": "1 creature",
+                    "saving_throw": "None",
+                    "description": "First extracted spell.",
+                    "source_document": "Player's Handbook",
+                    "source_page": 112,
+                    "confidence": 0.95,
+                    "needs_review": False,
+                    "extraction_start_line": 1,
+                    "extraction_end_line": 2,
+                },
+                {
+                    "name": "Shield",
+                    "class_list": "Wizard",
+                    "level": 1,
+                    "school": ["Abjuration"],
+                    "range": "Self",
+                    "components": ["V", "S"],
+                    "duration": "1 round",
+                    "casting_time": "1",
+                    "area_of_effect": "Special",
+                    "saving_throw": "None",
+                    "description": "Second extracted spell.",
+                    "source_document": "Player's Handbook",
+                    "source_page": 112,
+                    "confidence": 0.95,
+                    "needs_review": False,
+                    "extraction_start_line": 2,
+                    "extraction_end_line": 4,
+                },
+            ]
+        )
+
+        def _fake_create(**kwargs: object) -> SimpleNamespace:
+            captured_requests.append(dict(kwargs))
+            payload = next(response_payloads)
+            return SimpleNamespace(
+                content=[{"text": f"```json\n{json.dumps(payload)}\n```"}]
+            )
+
+        fake_client = SimpleNamespace(messages=SimpleNamespace(create=_fake_create))
+        fake_anthropic_module = SimpleNamespace(Anthropic=lambda api_key: fake_client)
+
+        with patch(
+            "app.pipeline.extraction._load_optional_module",
+            return_value=fake_anthropic_module,
+        ), patch(
+            "app.pipeline.extraction._resolve_anthropic_api_key",
+            return_value="test-key",
+        ):
+            extract_all_pending(
+                session_state,
+                config=AppConfig(stage2_max_attempts=1),
+            )
+
+        self.assertEqual(len(captured_requests), 2)
+        self.assertEqual(
+            [request["model"] for request in captured_requests],
+            ["claude-sonnet-4-latest", "claude-sonnet-4-latest"],
+        )
+        self.assertEqual(
+            [record.status for record in session_state.records],
+            [SpellRecordStatus.CONFIRMED, SpellRecordStatus.CONFIRMED],
+        )
+        self.assertEqual(
+            [record.canonical_spell.name if record.canonical_spell else None for record in session_state.records],
+            ["Magic Missile", "Shield"],
+        )
+
+    def test_extract_all_pending_sets_needs_review_for_weak_extraction(self) -> None:
+        session_state = self._build_pending_session()
+        session_state.records = [session_state.records[0]]
+        session_state.selected_spell_id = session_state.records[0].spell_id
+
+        def weak_stage2_caller(_request: Stage2ExtractionInput) -> dict[str, object]:
+            return {
+                "name": "Broken Priest Spell",
+                "class_list": "Priest",
+                "level": "0",
+                "school": [],
+                "sphere": [],
+                "source_document": "Player's Handbook",
+                "extraction_start_line": _request.record.boundary_start_line,
+                "extraction_end_line": _request.record.boundary_end_line,
+            }
+
+        extract_all_pending(
+            session_state,
+            config=AppConfig(stage2_max_attempts=2),
+            stage2_caller=weak_stage2_caller,
+        )
+
+        self.assertEqual(session_state.records[0].status, SpellRecordStatus.NEEDS_REVIEW)
+        self.assertIsNotNone(session_state.records[0].canonical_spell)
+        self.assertTrue(session_state.records[0].canonical_spell.needs_review)
+
+    def test_extract_all_pending_sets_confirmed_for_clean_extraction(self) -> None:
+        session_state = self._build_pending_session()
+        session_state.records = [session_state.records[0]]
+        session_state.selected_spell_id = session_state.records[0].spell_id
+
+        def clean_stage2_caller(_request: Stage2ExtractionInput) -> dict[str, object]:
+            return {
+                **_spell_payload(
+                    name="Magic Missile",
+                    level=1,
+                    start_line=_request.record.boundary_start_line,
+                    end_line=_request.record.boundary_end_line,
+                ),
+                "confidence": 0.95,
+                "needs_review": False,
+            }
+
+        extract_all_pending(
+            session_state,
+            config=AppConfig(stage2_max_attempts=2),
+            stage2_caller=clean_stage2_caller,
+        )
+
+        self.assertEqual(session_state.records[0].status, SpellRecordStatus.CONFIRMED)
+        self.assertIsNotNone(session_state.records[0].canonical_spell)
+        self.assertFalse(session_state.records[0].canonical_spell.needs_review)
+
+    def test_extract_all_pending_overrides_model_provenance_with_record_boundaries(self) -> None:
+        session_state = self._build_pending_session()
+        session_state.records = [session_state.records[0]]
+        session_state.selected_spell_id = session_state.records[0].spell_id
+        record = session_state.records[0]
+
+        def stage2_caller(_request: Stage2ExtractionInput) -> dict[str, object]:
+            return {
+                **_spell_payload(
+                    name="Magic Missile",
+                    level=1,
+                    start_line=999,
+                    end_line=1000,
+                ),
+                "source_document": "hallucinated-source.pdf",
+                "source_page": 999,
+                "extraction_start_line": 999,
+                "extraction_end_line": 1000,
+            }
+
+        extract_all_pending(
+            session_state,
+            config=AppConfig(stage2_max_attempts=2),
+            stage2_caller=stage2_caller,
+        )
+
+        self.assertIsNotNone(record.canonical_spell)
+        canonical_spell = record.canonical_spell
+        if canonical_spell is None:
+            self.fail("Expected extracted canonical spell.")
+        self.assertEqual(canonical_spell.description, "Magic Missile description.")
+        self.assertEqual(canonical_spell.source_document, "spellbook.pdf")
+        self.assertEqual(canonical_spell.source_page, 0)
+        self.assertEqual(canonical_spell.extraction_start_line, record.boundary_start_line)
+        self.assertEqual(canonical_spell.extraction_end_line, record.boundary_end_line)
+
+    def test_extract_all_pending_sets_needs_review_when_confidence_below_threshold(self) -> None:
+        session_state = self._build_pending_session()
+        session_state.records = [session_state.records[0]]
+        session_state.selected_spell_id = session_state.records[0].spell_id
+
+        def low_confidence_stage2_caller(_request: Stage2ExtractionInput) -> dict[str, object]:
+            return {
+                **_spell_payload(
+                    name="Magic Missile",
+                    level=1,
+                    start_line=_request.record.boundary_start_line,
+                    end_line=_request.record.boundary_end_line,
+                ),
+                "confidence": 0.7,
+                "needs_review": False,
+            }
+
+        extract_all_pending(
+            session_state,
+            config=AppConfig(stage2_max_attempts=2, confidence_threshold=0.85),
+            stage2_caller=low_confidence_stage2_caller,
+        )
+
+        self.assertEqual(session_state.records[0].status, SpellRecordStatus.NEEDS_REVIEW)
+        self.assertIsNotNone(session_state.records[0].canonical_spell)
+        self.assertFalse(session_state.records[0].canonical_spell.needs_review)
+
+    def test_extract_all_pending_creates_placeholder_when_stage2_retries_exhausted(self) -> None:
+        session_state = self._build_pending_session()
+        session_state.records = [session_state.records[0]]
+        session_state.selected_spell_id = session_state.records[0].spell_id
+        attempts = 0
+
+        def failing_stage2_caller(_request: Stage2ExtractionInput) -> dict[str, object]:
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("stage2 transport error")
+
+        extract_all_pending(
+            session_state,
+            config=AppConfig(stage2_max_attempts=3),
+            stage2_caller=failing_stage2_caller,
+        )
+
+        self.assertEqual(attempts, 3)
+        self.assertEqual(session_state.records[0].status, SpellRecordStatus.NEEDS_REVIEW)
+        self.assertIsNotNone(session_state.records[0].canonical_spell)
+        self.assertTrue(session_state.records[0].canonical_spell.needs_review)
+        self.assertIn(
+            "failed after 3 attempt(s)",
+            session_state.records[0].canonical_spell.review_notes or "",
+        )
+
+    def test_extract_all_pending_placeholder_clamps_stale_boundaries_for_source_page(self) -> None:
+        session_state = self._build_pending_session()
+        session_state.records = [session_state.records[0]]
+        session_state.selected_spell_id = session_state.records[0].spell_id
+        session_state.records[0].boundary_start_line = 999
+        session_state.records[0].boundary_end_line = 1005
+
+        def failing_stage2_caller(_request: Stage2ExtractionInput) -> dict[str, object]:
+            raise RuntimeError("stage2 transport error")
+
+        extract_all_pending(
+            session_state,
+            config=AppConfig(stage2_max_attempts=1),
+            stage2_caller=failing_stage2_caller,
+        )
+
+        self.assertEqual(session_state.records[0].status, SpellRecordStatus.NEEDS_REVIEW)
+        self.assertIsNotNone(session_state.records[0].canonical_spell)
+        placeholder_spell = session_state.records[0].canonical_spell
+        if placeholder_spell is None:
+            self.fail("Expected placeholder canonical spell after retries are exhausted.")
+        self.assertTrue(placeholder_spell.needs_review)
+        self.assertEqual(placeholder_spell.source_page, 0)
+        self.assertIn("failed after 1 attempt(s)", placeholder_spell.review_notes or "")
+
+    def test_extract_all_pending_placeholder_survives_page_span_value_error(self) -> None:
+        session_state = self._build_pending_session()
+        session_state.records = [session_state.records[0]]
+        session_state.selected_spell_id = session_state.records[0].spell_id
+
+        def failing_stage2_caller(_request: Stage2ExtractionInput) -> dict[str, object]:
+            raise RuntimeError("stage2 transport error")
+
+        with patch(
+            "app.pipeline.extraction.CoordinateAwareTextMap.page_span",
+            side_effect=ValueError("stale boundary span"),
+        ):
+            extract_all_pending(
+                session_state,
+                config=AppConfig(stage2_max_attempts=1),
+                stage2_caller=failing_stage2_caller,
+            )
+
+        self.assertEqual(session_state.records[0].status, SpellRecordStatus.NEEDS_REVIEW)
+        self.assertIsNotNone(session_state.records[0].canonical_spell)
+        placeholder_spell = session_state.records[0].canonical_spell
+        if placeholder_spell is None:
+            self.fail("Expected placeholder canonical spell when Stage 2 retries are exhausted.")
+        self.assertTrue(placeholder_spell.needs_review)
+        self.assertIsNone(placeholder_spell.source_page)
+        self.assertIn("failed after 1 attempt(s)", placeholder_spell.review_notes or "")
+
+    def test_extract_all_pending_placeholder_infers_priest_from_context_heading(self) -> None:
+        session_state = self._build_pending_session()
+        session_state.records = [session_state.records[0]]
+        session_state.selected_spell_id = session_state.records[0].spell_id
+        session_state.records[0].context_heading = "Priest Spells"
+
+        def failing_stage2_caller(_request: Stage2ExtractionInput) -> dict[str, object]:
+            raise RuntimeError("stage2 transport error")
+
+        extract_all_pending(
+            session_state,
+            config=AppConfig(stage2_max_attempts=1),
+            stage2_caller=failing_stage2_caller,
+        )
+
+        self.assertEqual(session_state.records[0].status, SpellRecordStatus.NEEDS_REVIEW)
+        placeholder_spell = session_state.records[0].canonical_spell
+        if placeholder_spell is None:
+            self.fail("Expected placeholder canonical spell after retries are exhausted.")
+        self.assertEqual(placeholder_spell.class_list, ClassList.PRIEST)
+        self.assertEqual(placeholder_spell.level, 1)
+        self.assertEqual(placeholder_spell.sphere, ["Unknown"])
+
+    def test_extract_all_pending_placeholder_falls_back_to_wizard_when_heading_unknown(self) -> None:
+        session_state = self._build_pending_session()
+        session_state.records = [session_state.records[0]]
+        session_state.selected_spell_id = session_state.records[0].spell_id
+        session_state.records[0].context_heading = "General Notes"
+
+        def failing_stage2_caller(_request: Stage2ExtractionInput) -> dict[str, object]:
+            raise RuntimeError("stage2 transport error")
+
+        extract_all_pending(
+            session_state,
+            config=AppConfig(stage2_max_attempts=1),
+            stage2_caller=failing_stage2_caller,
+        )
+
+        self.assertEqual(session_state.records[0].status, SpellRecordStatus.NEEDS_REVIEW)
+        placeholder_spell = session_state.records[0].canonical_spell
+        if placeholder_spell is None:
+            self.fail("Expected placeholder canonical spell after retries are exhausted.")
+        self.assertEqual(placeholder_spell.class_list, ClassList.WIZARD)
+        self.assertEqual(placeholder_spell.level, 0)
+        self.assertIsNone(placeholder_spell.sphere)
+
+
+class ReviewFlowServiceTests(unittest.TestCase):
+    def _build_review_session(self) -> SessionState:
+        routed_document = _build_routed_document(
+            [["Wizard Spells", "Magic Missile", "Range: 30 yards", "Duration: 1 round"]]
+        )
+        review_spell = _canonical_spell(
+            name="Magic Missile",
+            level=1,
+            start_line=1,
+            end_line=4,
+        )
+        confirmed_spell = _canonical_spell(
+            name="Shield",
+            level=1,
+            start_line=0,
+            end_line=1,
+        )
+        return SessionState(
+            source_sha256_hex=SHA_DISCOVERY,
+            last_open_path=str(routed_document.source_path),
+            coordinate_map=routed_document.coordinate_map,
+            records=[
+                SpellRecord(
+                    spell_id="review-1",
+                    status=SpellRecordStatus.NEEDS_REVIEW,
+                    extraction_order=0,
+                    section_order=0,
+                    boundary_start_line=1,
+                    boundary_end_line=4,
+                    context_heading="Wizard Spells",
+                    canonical_spell=review_spell,
+                ),
+                SpellRecord(
+                    spell_id="confirmed-1",
+                    status=SpellRecordStatus.CONFIRMED,
+                    extraction_order=1,
+                    section_order=1,
+                    boundary_start_line=0,
+                    boundary_end_line=1,
+                    context_heading="Wizard Spells",
+                    canonical_spell=confirmed_spell,
+                ),
+            ],
+            selected_spell_id="review-1",
+        )
+
+    def test_apply_review_edits_mutates_draft_only(self) -> None:
+        session_state = self._build_review_session()
+        record = session_state.records[0]
+        original_canonical = record.canonical_spell
+
+        apply_review_edits(
+            record,
+            draft_updates={"range": "60 yards", "review_notes": "Draft edit"},
+            config=AppConfig(),
+        )
+
+        self.assertTrue(record.draft_dirty)
+        self.assertIsNotNone(record.draft_spell)
+        self.assertEqual(record.draft_spell.range, "60 yards")
+        self.assertEqual(record.canonical_spell, original_canonical)
+
+    def test_accept_review_moves_record_to_confirmed(self) -> None:
+        session_state = self._build_review_session()
+        record = session_state.records[0]
+        apply_review_edits(
+            record,
+            draft_updates={"range": "45 yards"},
+            config=AppConfig(),
+        )
+
+        accepted = accept_review_record(session_state, spell_id="review-1")
+
+        self.assertTrue(accepted)
+        self.assertEqual(record.status, SpellRecordStatus.CONFIRMED)
+        self.assertEqual(record.canonical_spell.range, "45 yards")
+        self.assertIsNone(record.draft_spell)
+        self.assertFalse(record.draft_dirty)
+
+    def test_accept_review_record_learns_custom_school_and_sphere_on_commit(self) -> None:
+        session_state = self._build_review_session()
+        record = session_state.records[0]
+        config = AppConfig()
+        apply_review_edits(
+            record,
+            draft_updates={
+                "class_list": ClassList.PRIEST,
+                "school": [" Runecraft ", "Runecraft", "Sigilry"],
+                "sphere": [" Twilight ", "Twilight"],
+            },
+            config=config,
+        )
+
+        accepted = accept_review_record(session_state, spell_id="review-1", config=config)
+
+        self.assertTrue(accepted)
+        self.assertEqual(config.custom_schools, ["Runecraft", "Sigilry"])
+        self.assertEqual(config.custom_spheres, ["Twilight"])
+
+    def test_accept_review_duplicate_skip_leaves_review_record_uncommitted(self) -> None:
+        session_state = self._build_review_session()
+        record = session_state.records[0]
+        apply_review_edits(
+            record,
+            draft_updates={"name": "Shield", "class_list": ClassList.WIZARD},
+            config=AppConfig(),
+        )
+
+        accepted = accept_review_record(
+            session_state,
+            spell_id="review-1",
+            duplicate_resolution=DuplicateResolutionStrategy.SKIP,
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(record.status, SpellRecordStatus.NEEDS_REVIEW)
+        self.assertTrue(record.draft_dirty)
+
+    def test_accept_review_duplicate_overwrite_replaces_confirmed_and_keeps_review_record(self) -> None:
+        session_state = self._build_review_session()
+        record = session_state.records[0]
+        apply_review_edits(
+            record,
+            draft_updates={"name": "Shield", "description": "Review replacement description."},
+            config=AppConfig(),
+        )
+
+        accepted = accept_review_record(
+            session_state,
+            spell_id="review-1",
+            duplicate_resolution=DuplicateResolutionStrategy.OVERWRITE,
+        )
+
+        self.assertTrue(accepted)
+        spell_ids = [current.spell_id for current in session_state.records]
+        self.assertEqual(spell_ids, ["review-1"])
+        self.assertEqual(
+            session_state.records[0].canonical_spell.description,
+            "Review replacement description.",
+        )
+        self.assertEqual(session_state.records[0].status, SpellRecordStatus.CONFIRMED)
+
+    def test_accept_review_duplicate_overwrite_preserves_review_provenance_consistency(self) -> None:
+        session_state = self._build_review_session()
+        record = session_state.records[0]
+        apply_review_edits(
+            record,
+            draft_updates={
+                "name": "Shield",
+                "source_document": "UserEdited.docx",
+                "source_page": 77,
+                "extraction_start_line": 999,
+                "extraction_end_line": 1001,
+            },
+            config=AppConfig(),
+        )
+
+        accepted = accept_review_record(
+            session_state,
+            spell_id="review-1",
+            duplicate_resolution=DuplicateResolutionStrategy.OVERWRITE,
+        )
+
+        self.assertTrue(accepted)
+        self.assertEqual([current.spell_id for current in session_state.records], ["review-1"])
+        self.assertEqual(record.status, SpellRecordStatus.CONFIRMED)
+        self.assertEqual(record.boundary_start_line, 1)
+        self.assertEqual(record.boundary_end_line, 4)
+        self.assertEqual(record.canonical_spell.extraction_start_line, record.boundary_start_line)
+        self.assertEqual(record.canonical_spell.extraction_end_line, record.boundary_end_line)
+        self.assertEqual(record.canonical_spell.source_document, "spellbook.pdf")
+        self.assertEqual(record.canonical_spell.source_page, 0)
+
+    def test_accept_review_duplicate_keep_both_confirms_review_record(self) -> None:
+        session_state = self._build_review_session()
+        record = session_state.records[0]
+        apply_review_edits(
+            record,
+            draft_updates={"name": "Shield"},
+            config=AppConfig(),
+        )
+
+        accepted = accept_review_record(
+            session_state,
+            spell_id="review-1",
+            duplicate_resolution=DuplicateResolutionStrategy.KEEP_BOTH,
+        )
+
+        self.assertTrue(accepted)
+        self.assertEqual(record.status, SpellRecordStatus.CONFIRMED)
+        self.assertEqual(len(session_state.records), 2)
+
+    def test_save_confirmed_changes_raises_explicit_duplicate_error(self) -> None:
+        session_state = self._build_review_session()
+        session_state.records.append(
+            SpellRecord(
+                spell_id="confirmed-2",
+                status=SpellRecordStatus.CONFIRMED,
+                extraction_order=2,
+                section_order=2,
+                boundary_start_line=5,
+                boundary_end_line=6,
+                canonical_spell=_canonical_spell(
+                    name="Magic Missile",
+                    level=1,
+                    start_line=5,
+                    end_line=6,
+                ),
+            )
+        )
+        confirmed_record = session_state.records[1]
+        apply_review_edits(
+            confirmed_record,
+            draft_updates={"name": "Magic Missile"},
+            config=AppConfig(),
+        )
+
+        with self.assertRaises(DuplicateConfirmedSpellError):
+            save_confirmed_changes(session_state, spell_id="confirmed-1")
+
+    def test_get_confirmed_save_duplicate_conflict_surfaces_same_collision_as_save_m001(
+        self,
+    ) -> None:
+        session_state = self._build_review_session()
+        session_state.records.append(
+            SpellRecord(
+                spell_id="confirmed-2",
+                status=SpellRecordStatus.CONFIRMED,
+                extraction_order=2,
+                section_order=2,
+                boundary_start_line=5,
+                boundary_end_line=6,
+                canonical_spell=_canonical_spell(
+                    name="Magic Missile",
+                    level=1,
+                    start_line=5,
+                    end_line=6,
+                ),
+            )
+        )
+        confirmed_record = session_state.records[1]
+        apply_review_edits(
+            confirmed_record,
+            draft_updates={"name": "Magic Missile"},
+            config=AppConfig(),
+        )
+
+        conflict = get_confirmed_save_duplicate_conflict(session_state, spell_id="confirmed-1")
+
+        self.assertIsNotNone(conflict)
+        self.assertEqual(conflict.spell_id, "confirmed-2")
+
+    def test_get_confirmed_save_duplicate_conflict_none_when_no_collision_m001(self) -> None:
+        session_state = self._build_review_session()
+
+        self.assertIsNone(get_confirmed_save_duplicate_conflict(session_state, spell_id="confirmed-1"))
+
+    def test_get_confirmed_save_duplicate_conflict_none_for_non_confirmed_record_m001(
+        self,
+    ) -> None:
+        session_state = self._build_review_session()
+
+        self.assertIsNone(get_confirmed_save_duplicate_conflict(session_state, spell_id="review-1"))
+
+    def test_save_confirmed_changes_learns_custom_school_and_sphere_on_commit(self) -> None:
+        session_state = self._build_review_session()
+        config = AppConfig(
+            custom_schools=["Runecraft"],
+            custom_spheres=[" Twilight "],
+        )
+        confirmed_record = session_state.records[1]
+        apply_review_edits(
+            confirmed_record,
+            draft_updates={
+                "class_list": ClassList.PRIEST,
+                "school": ["Runecraft", "Runecraft", "Chronomancy "],
+                "sphere": ["Twilight", "Twilight", "Stars "],
+            },
+            config=config,
+        )
+
+        save_confirmed_changes(session_state, spell_id="confirmed-1", config=config)
+
+        self.assertEqual(config.custom_schools, ["Runecraft", "Chronomancy"])
+        self.assertEqual(config.custom_spheres, ["Twilight", "Stars"])
+
+    def test_save_confirmed_changes_does_not_learn_unknown_placeholder_terms(self) -> None:
+        session_state = self._build_review_session()
+        config = AppConfig()
+        confirmed_record = session_state.records[1]
+        apply_review_edits(
+            confirmed_record,
+            draft_updates={
+                "class_list": ClassList.PRIEST,
+                "school": ["Unknown", "  UNKNOWN ", "Chronomancy"],
+                "sphere": ["unknown", " Stars "],
+            },
+            config=config,
+        )
+
+        save_confirmed_changes(session_state, spell_id="confirmed-1", config=config)
+
+        self.assertEqual(config.custom_schools, ["Chronomancy"])
+        self.assertEqual(config.custom_spheres, ["Stars"])
+
+    def test_discard_record_draft_clears_draft_only(self) -> None:
+        session_state = self._build_review_session()
+        record = session_state.records[0]
+        apply_review_edits(
+            record,
+            draft_updates={"range": "50 yards"},
+            config=AppConfig(),
+        )
+
+        discard_record_draft(record)
+
+        self.assertFalse(record.draft_dirty)
+        self.assertIsNone(record.draft_spell)
+        self.assertEqual(record.canonical_spell.range, "30 yards")
+
+    def test_delete_record_removes_selected_record(self) -> None:
+        session_state = self._build_review_session()
+
+        deleted = delete_record(session_state, spell_id="review-1")
+
+        self.assertTrue(deleted)
+        self.assertEqual([record.spell_id for record in session_state.records], ["confirmed-1"])
+        self.assertIsNone(session_state.selected_spell_id)
+
+    def test_reextract_merges_into_draft_and_records_alt_conflict_candidates(self) -> None:
+        session_state = self._build_review_session()
+        record = session_state.records[0]
+        apply_review_edits(
+            record,
+            draft_updates={
+                "range": "60 yards",
+                "duration": "2 rounds",
+                "review_notes": "Manual draft note.",
+            },
+            config=AppConfig(),
+        )
+
+        def stage2_caller(request: Stage2ExtractionInput) -> dict[str, object]:
+            self.assertEqual(request.focus_prompt, "Improve range and description")
+            return {
+                **_spell_payload(
+                    name="Magic Missile",
+                    level=1,
+                    start_line=request.record.boundary_start_line,
+                    end_line=request.record.boundary_end_line,
+                ),
+                "range": "90 yards",
+                "duration": "1 round",
+                "description": "Improved description from re-extract.",
+                "review_notes": "Model candidate.",
+                "needs_review": True,
+                "confidence": 0.4,
+            }
+
+        merged = reextract_record_into_draft(
+            session_state,
+            spell_id="review-1",
+            focus_prompt="Improve range and description",
+            config=AppConfig(stage2_max_attempts=2),
+            stage2_caller=stage2_caller,
+        )
+
+        self.assertEqual(merged.description, "Improved description from re-extract.")
+        self.assertEqual(merged.range, "60 yards")
+        self.assertEqual(merged.duration, "2 rounds")
+        self.assertTrue(record.draft_dirty)
+        self.assertEqual(record.canonical_spell.range, "30 yards")
+        alt_tags = parse_alt_tags(merged.review_notes)
+        self.assertEqual(alt_tags.get("range"), "90 yards")
+
+    def test_reextract_rejects_pending_records(self) -> None:
+        session_state = self._build_review_session()
+        session_state.records[0].status = SpellRecordStatus.PENDING_EXTRACTION
+
+        with self.assertRaises(InvalidRecordStateError):
+            reextract_record_into_draft(
+                session_state,
+                spell_id="review-1",
+                focus_prompt="Improve description",
+                config=AppConfig(stage2_max_attempts=1),
+                stage2_caller=lambda _request: _spell_payload(
+                    name="Magic Missile",
+                    level=1,
+                    start_line=1,
+                    end_line=4,
+                ),
+            )
+
+    def test_reextract_overrides_model_provenance_with_record_boundaries(self) -> None:
+        session_state = self._build_review_session()
+        record = session_state.records[0]
+
+        def stage2_caller(request: Stage2ExtractionInput) -> dict[str, object]:
+            return {
+                **_spell_payload(
+                    name="Magic Missile",
+                    level=1,
+                    start_line=999,
+                    end_line=1000,
+                ),
+                "description": "Improved description from re-extract.",
+                "source_document": "hallucinated-reextract.pdf",
+                "source_page": 4242,
+                "extraction_start_line": 999,
+                "extraction_end_line": 1000,
+            }
+
+        merged = reextract_record_into_draft(
+            session_state,
+            spell_id="review-1",
+            focus_prompt="Improve description",
+            config=AppConfig(stage2_max_attempts=2),
+            stage2_caller=stage2_caller,
+        )
+
+        self.assertEqual(merged.description, "Improved description from re-extract.")
+        self.assertEqual(merged.source_document, "spellbook.pdf")
+        self.assertEqual(merged.source_page, 0)
+        self.assertEqual(merged.extraction_start_line, record.boundary_start_line)
+        self.assertEqual(merged.extraction_end_line, record.boundary_end_line)
+
+    def test_save_confirmed_changes_raises_record_not_found(self) -> None:
+        session_state = self._build_review_session()
+
+        with self.assertRaises(RecordNotFoundError):
+            save_confirmed_changes(session_state, spell_id="missing")
 
 
 if __name__ == "__main__":

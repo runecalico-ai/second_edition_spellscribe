@@ -12,7 +12,9 @@ Uncertain extractions are queued for human review in the UI before export as JSO
 
 ## Commands
 
-```bash
+```pwsh
+# Activate virtual environment (Windows)
+. .\.venv\Scripts\Activate.ps1
 # Run all tests
 python -m unittest discover tests/
 

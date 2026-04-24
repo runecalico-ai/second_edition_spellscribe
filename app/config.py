@@ -235,6 +235,7 @@ class AppConfig:
     api_key: str = ""
     stage1_model: str = "claude-haiku-4-5-latest"
     stage2_model: str = "claude-sonnet-4-latest"
+    stage2_max_attempts: int = 3
     stage1_empty_page_cutoff: int = 10
     max_concurrent_extractions: int = 5
     confidence_threshold: float = 0.85
@@ -264,6 +265,10 @@ class AppConfig:
             stage2_model=_coerce_non_empty_string(
                 self.stage2_model,
                 default="claude-sonnet-4-latest",
+            ),
+            stage2_max_attempts=_coerce_positive_int(
+                self.stage2_max_attempts,
+                default=3,
             ),
             stage1_empty_page_cutoff=_coerce_non_negative_int(
                 self.stage1_empty_page_cutoff,
