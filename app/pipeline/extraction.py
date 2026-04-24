@@ -570,9 +570,14 @@ def save_confirmed_changes(
         raise DuplicateConfirmedSpellError(
             f"confirmed duplicate conflict with '{conflict_record.spell_id}'"
         )
-    _commit_spell_to_record(record, candidate, status=SpellRecordStatus.CONFIRMED)
+    authoritative_candidate = _enforce_authoritative_provenance(
+        session_state,
+        record=record,
+        spell=candidate,
+    )
+    _commit_spell_to_record(record, authoritative_candidate, status=SpellRecordStatus.CONFIRMED)
     if config is not None:
-        _learn_custom_terms_from_spell(config, candidate)
+        _learn_custom_terms_from_spell(config, authoritative_candidate)
     return record
 
 

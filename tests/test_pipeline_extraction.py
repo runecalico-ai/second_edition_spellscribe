@@ -3522,6 +3522,201 @@ class ReviewFlowServiceTests(unittest.TestCase):
 
         self.assertFalse(accepted)  # review draft collides with the uppercased confirmed name
 
+    def test_reextract_raises_runtime_error_with_chained_cause_when_all_retries_exhausted(self) -> None:
+        # [M-001] All retry attempts raise; RuntimeError should be raised with last error chained
+        session_state = self._build_review_session()
+        trigger_error = RuntimeError("transport failure")
+
+        def failing_caller(_request: Stage2ExtractionInput) -> dict[str, object]:
+            raise trigger_error
+
+        with self.assertRaises(RuntimeError) as caught:
+            reextract_record_into_draft(
+                session_state,
+                spell_id="review-1",
+                focus_prompt="Improve description",
+                config=AppConfig(stage2_max_attempts=3),
+                stage2_caller=failing_caller,
+            )
+
+        self.assertIn("Stage 2 re-extract failed", str(caught.exception))
+        self.assertIs(caught.exception.__cause__, trigger_error)
+
+    def test_accept_review_record_raises_invalid_state_for_confirmed_record(self) -> None:
+        # [M-002] accept_review_record rejects CONFIRMED status
+        session_state = self._build_review_session()
+
+        with self.assertRaises(InvalidRecordStateError):
+            accept_review_record(session_state, spell_id="confirmed-1")
+
+    def test_accept_review_record_raises_invalid_state_for_pending_record(self) -> None:
+        # [M-002] accept_review_record rejects PENDING_EXTRACTION status
+        session_state = self._build_review_session()
+        session_state.records[0].status = SpellRecordStatus.PENDING_EXTRACTION
+
+        with self.assertRaises(InvalidRecordStateError):
+            accept_review_record(session_state, spell_id="review-1")
+
+    def test_save_confirmed_changes_raises_invalid_state_for_needs_review_record(self) -> None:
+        # [M-002] save_confirmed_changes rejects NEEDS_REVIEW status
+        session_state = self._build_review_session()
+
+        with self.assertRaises(InvalidRecordStateError):
+            save_confirmed_changes(session_state, spell_id="review-1")
+
+    def test_save_confirmed_changes_raises_invalid_state_for_pending_extraction_record(self) -> None:
+        # [M-002] save_confirmed_changes rejects PENDING_EXTRACTION status
+        session_state = self._build_review_session()
+        session_state.records[0].status = SpellRecordStatus.PENDING_EXTRACTION
+
+        with self.assertRaises(InvalidRecordStateError):
+            save_confirmed_changes(session_state, spell_id="review-1")
+
+    def test_reextract_merge_accepts_candidate_when_draft_equals_canonical(self) -> None:
+        # [M-003] Branch (a): draft == canonical → merged spell should use candidate value
+        session_state = self._build_review_session()
+        # Do NOT apply_review_edits — leave draft_spell None so draft == canonical
+
+        def stage2_caller(request: Stage2ExtractionInput) -> dict[str, object]:
+            return {
+                **_spell_payload(
+                    name="Magic Missile",
+                    level=1,
+                    start_line=request.record.boundary_start_line,
+                    end_line=request.record.boundary_end_line,
+                ),
+                "range": "120 yards",  # differs from canonical "30 yards"
+            }
+
+        merged = reextract_record_into_draft(
+            session_state,
+            spell_id="review-1",
+            focus_prompt="Improve range",
+            config=AppConfig(stage2_max_attempts=1),
+            stage2_caller=stage2_caller,
+        )
+
+        # draft == canonical, so candidate value wins
+        self.assertEqual(merged.range, "120 yards")
+        # No ALT tag should be written (no three-way conflict)
+        from app.utils.review_notes import parse_alt_tags
+        self.assertNotIn("range", parse_alt_tags(merged.review_notes))
+
+    def test_reextract_merge_keeps_draft_without_alt_tag_when_candidate_matches_draft(self) -> None:
+        # [M-003] Branch (b): candidate == draft → keep draft, no ALT tag
+        session_state = self._build_review_session()
+        record = session_state.records[0]
+        apply_review_edits(
+            record,
+            draft_updates={"range": "60 yards"},
+            config=AppConfig(),
+        )
+
+        def stage2_caller(request: Stage2ExtractionInput) -> dict[str, object]:
+            return {
+                **_spell_payload(
+                    name="Magic Missile",
+                    level=1,
+                    start_line=request.record.boundary_start_line,
+                    end_line=request.record.boundary_end_line,
+                ),
+                "range": "60 yards",  # candidate == draft (differs from canonical "30 yards")
+            }
+
+        merged = reextract_record_into_draft(
+            session_state,
+            spell_id="review-1",
+            focus_prompt="Improve range",
+            config=AppConfig(stage2_max_attempts=1),
+            stage2_caller=stage2_caller,
+        )
+
+        # candidate == draft → keep draft, no ALT tag
+        self.assertEqual(merged.range, "60 yards")
+        from app.utils.review_notes import parse_alt_tags
+        self.assertNotIn("range", parse_alt_tags(merged.review_notes))
+
+    def test_reextract_merge_keeps_draft_without_alt_tag_when_candidate_matches_canonical(self) -> None:
+        # [M-003] Branch (b): candidate == canonical → keep draft, no ALT tag
+        session_state = self._build_review_session()
+        record = session_state.records[0]
+        apply_review_edits(
+            record,
+            draft_updates={"range": "60 yards"},  # draft differs from canonical "30 yards"
+            config=AppConfig(),
+        )
+
+        def stage2_caller(request: Stage2ExtractionInput) -> dict[str, object]:
+            return {
+                **_spell_payload(
+                    name="Magic Missile",
+                    level=1,
+                    start_line=request.record.boundary_start_line,
+                    end_line=request.record.boundary_end_line,
+                ),
+                "range": "30 yards",  # candidate == canonical (not == draft)
+            }
+
+        merged = reextract_record_into_draft(
+            session_state,
+            spell_id="review-1",
+            focus_prompt="Improve range",
+            config=AppConfig(stage2_max_attempts=1),
+            stage2_caller=stage2_caller,
+        )
+
+        # candidate == canonical → keep draft, no ALT tag
+        self.assertEqual(merged.range, "60 yards")
+        from app.utils.review_notes import parse_alt_tags
+        self.assertNotIn("range", parse_alt_tags(merged.review_notes))
+
+    def test_apply_review_edits_does_not_mutate_state_on_invalid_data(self) -> None:
+        # [M-004] Invalid field value → draft_spell and draft_dirty must remain unchanged
+        session_state = self._build_review_session()
+        record = session_state.records[0]
+        original_draft_spell = record.draft_spell
+        original_draft_dirty = record.draft_dirty
+
+        with self.assertRaises(Exception):  # ValidationError from pydantic
+            apply_review_edits(
+                record,
+                draft_updates={"level": "not-an-int"},
+                config=AppConfig(),
+            )
+
+        self.assertIs(record.draft_spell, original_draft_spell)
+        self.assertEqual(record.draft_dirty, original_draft_dirty)
+
+    def test_get_review_draft_raises_when_both_draft_and_canonical_are_none(self) -> None:
+        # [M-005] Record with no canonical_spell and no draft_spell raises InvalidRecordStateError
+        session_state = self._build_review_session()
+        record = session_state.records[0]
+        record.canonical_spell = None
+        record.draft_spell = None
+
+        with self.assertRaises(InvalidRecordStateError):
+            get_review_draft(record)
+
+    def test_reextract_raises_invalid_state_when_canonical_spell_is_none(self) -> None:
+        # [M-006] NEEDS_REVIEW record with no canonical_spell raises InvalidRecordStateError
+        session_state = self._build_review_session()
+        record = session_state.records[0]
+        record.canonical_spell = None
+
+        with self.assertRaises(InvalidRecordStateError):
+            reextract_record_into_draft(
+                session_state,
+                spell_id="review-1",
+                focus_prompt="Improve description",
+                config=AppConfig(stage2_max_attempts=1),
+                stage2_caller=lambda _request: _spell_payload(
+                    name="Magic Missile",
+                    level=1,
+                    start_line=1,
+                    end_line=4,
+                ),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
