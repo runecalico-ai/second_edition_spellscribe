@@ -41,6 +41,33 @@ The system SHALL display records in confirmed, needs-review, and pending section
 - **WHEN** the user selects a confirmed or needs-review record
 - **THEN** the right panel shows the review editor for that record
 
+### Requirement: The review editor honors Stage 2 commit and duplicate rules
+The workbench SHALL use Stage 2 pipeline APIs so commit actions and duplicate handling match `spell-extraction-review`.
+
+#### Scenario: Confirmed save is blocked when duplicate preflight fires
+- **WHEN** the selected record is `confirmed` and `get_confirmed_save_duplicate_conflict(session_state, spell_id=...)` returns a conflicting record for the current draft identity
+- **THEN** the workbench keeps `Save Changes` disabled (or otherwise prevents commit) until the draft no longer collides on normalized name and class list
+
+#### Scenario: Accept duplicate offers overwrite, keep both, or skip
+- **WHEN** the user invokes Accept on a `needs_review` record whose draft conflicts with an existing confirmed record on normalized name and class list
+- **THEN** the workbench offers overwrite, keep both, or skip, and passes the chosen `DuplicateResolutionStrategy` into `accept_review_record`
+
+#### Scenario: Re-extract runs with focus prompt
+- **WHEN** the user requests Re-extract with a focus prompt on a `needs_review` or `confirmed` record
+- **THEN** the workbench calls `reextract_record_into_draft` with that prompt and updates the review editor from the merged draft
+
+#### Scenario: Discard Draft clears the in-memory draft
+- **WHEN** the user chooses Discard for a selected `needs_review` or `confirmed` record that has a draft
+- **THEN** the workbench calls `discard_record_draft` on that record and refreshes the editor from `canonical_spell`
+
+#### Scenario: Draft dirty state is visible
+- **WHEN** the selected `needs_review` or `confirmed` record has `draft_dirty` set
+- **THEN** the workbench shows a visible dirty state (for example a banner or indicator) until the user commits or discards
+
+#### Scenario: Delete removes the record from the session
+- **WHEN** the user confirms delete for a record shown in the spell list
+- **THEN** the workbench calls `delete_record`, removes the row from the list, and clears selection if the deleted record was selected
+
 ### Requirement: The workbench manages progress, cancel, and session prompts
 The system SHALL show extraction progress and SHALL handle restore and file-switch prompts according to the revised spec.
 

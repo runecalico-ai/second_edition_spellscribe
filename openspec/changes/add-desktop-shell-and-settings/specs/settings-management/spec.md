@@ -16,7 +16,7 @@ The system SHALL let the user configure the revised-spec extraction and OCR sett
 
 #### Scenario: User can edit model and threshold settings
 - **WHEN** the user opens Settings
-- **THEN** the dialog includes controls for Stage 1 model, Stage 2 model, empty-page cutoff, max parallel extractions, OCR engine, and confidence threshold
+- **THEN** the dialog includes controls for Stage 1 model, Stage 2 model, empty-page cutoff, max concurrent extractions (`max_concurrent_extractions`), OCR engine, and confidence threshold
 
 #### Scenario: User can edit path defaults
 - **WHEN** the user opens Settings
@@ -28,6 +28,10 @@ The system SHALL let the user choose environment, credential-manager, or local-p
 #### Scenario: Credential-manager mode uses keyring metadata
 - **WHEN** the user selects Remember on this PC
 - **THEN** the app uses the keyring-backed credential-manager mode documented in the revised spec
+
+#### Scenario: Local plaintext mode surfaces explicit risk
+- **WHEN** the user selects `local_plaintext` API key storage (or equivalent wording in the UI)
+- **THEN** the dialog shows a clear warning that the key will be stored in the on-disk config without OS keyring protection, and the user SHALL confirm that risk before the setting is saved (for example via a dedicated confirmation control)
 
 ### Requirement: The settings dialog can test API-key configuration
 The system SHALL let the user test whether the current API-key configuration resolves successfully.

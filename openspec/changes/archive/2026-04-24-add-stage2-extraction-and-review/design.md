@@ -18,6 +18,9 @@ The design depends on the core session models, document ingestion, and discovery
 - Implement export.
 - Implement packaging.
 
+### Presentation (deferred)
+- Dirty-state banners, disabled actions, and duplicate-resolution **dialogs** belong in the **desktop workbench** (`add-desktop-shell-and-settings`). Stage 2 defines session invariants and pipeline APIs (`get_review_draft`, `apply_review_edits`, `get_confirmed_save_duplicate_conflict`, `accept_review_record`, etc.) that the shell must call; it does not ship Qt/widgets here.
+
 ## Decisions
 
 ### Update records in place instead of creating replacement records
@@ -55,7 +58,7 @@ Alternative considered:
 ## Risks / Trade-offs
 
 - Stage 2 can still produce malformed output after retries → Always create a best-effort review record instead of dropping data.
-- Draft and canonical state can diverge for long periods → Make commit points and dirty-state warnings explicit in the UI.
+- Draft and canonical state can diverge for long periods → The workbench SHALL make commit points and dirty-state warnings explicit (see Presentation deferred above).
 - Re-extract merge rules can be hard to verify → Keep the merge field-aware and test conflicts through focused unit tests.
 
 ## Migration Plan

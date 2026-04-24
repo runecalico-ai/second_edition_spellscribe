@@ -1,0 +1,23 @@
+## Sequencing
+
+- Implement after `add-core-session-models`, `add-document-ingestion-and-identity`, and `add-discovery-and-pending-queue`.
+- Finish this before `add-export-capabilities` and `add-desktop-shell-and-settings` so record status transitions, drafts, and merge rules are already defined.
+- **Workbench presentation** (review editor widget, commit buttons, disabled Save when `get_confirmed_save_duplicate_conflict` is non-None, duplicate-resolution prompts, dirty-state banners) is implemented under **`add-desktop-shell-and-settings`**, not in this change.
+
+## 1. Stage 2 extraction pipeline
+
+- [x] 1.1 Implement selected and all-pending Stage 2 queueing with in-place `SpellRecord` updates
+- [x] 1.2 Implement `LaxSpell` conversion, retry handling, and placeholder review fallback behavior
+- [x] 1.3 Add the CLI extraction harness for single-file test runs
+
+## 2. Review and confirmation flow
+
+- [x] 2.1 Implement the draft-backed review **data path** for `needs_review` and `confirmed` records (`draft_spell`, `get_review_draft`, `apply_review_edits`, `discard_record_draft`); workbench form UI is deferred per Sequencing
+- [x] 2.2 Implement `Accept`, `Save Changes`, `Discard Draft`, `Delete`, and duplicate-resolution behavior
+- [x] 2.3 Implement `Re-extract` focus prompts and draft-only field-aware merge behavior
+- [x] 2.4 Implement `parse_alt_tags`, `upsert_alt_tag`, and `strip_alt_tags` in `review_notes` and integrate **`upsert_alt_tag` / `strip_alt_tags`** into re-extract merge (`_merge_reextract_candidate`); callers may use `parse_alt_tags` for tests and UI
+
+## 3. Verification
+
+- [x] 3.1 Add tests for Stage 2 post-routing, placeholder fallback, and in-place status transitions
+- [x] 3.2 Add tests for draft commit rules, duplicate handling, and re-extract merge behavior
