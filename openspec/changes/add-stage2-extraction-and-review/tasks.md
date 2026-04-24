@@ -2,6 +2,7 @@
 
 - Implement after `add-core-session-models`, `add-document-ingestion-and-identity`, and `add-discovery-and-pending-queue`.
 - Finish this before `add-export-capabilities` and `add-desktop-shell-and-settings` so record status transitions, drafts, and merge rules are already defined.
+- **Workbench presentation** (review editor widget, commit buttons, disabled Save when `get_confirmed_save_duplicate_conflict` is non-None, duplicate-resolution prompts, dirty-state banners) is implemented under **`add-desktop-shell-and-settings`**, not in this change.
 
 ## 1. Stage 2 extraction pipeline
 
@@ -11,10 +12,10 @@
 
 ## 2. Review and confirmation flow
 
-- [x] 2.1 Implement the draft-backed review form for `needs_review` and `confirmed` records
+- [x] 2.1 Implement the draft-backed review **data path** for `needs_review` and `confirmed` records (`draft_spell`, `get_review_draft`, `apply_review_edits`, `discard_record_draft`); workbench form UI is deferred per Sequencing
 - [x] 2.2 Implement `Accept`, `Save Changes`, `Discard Draft`, `Delete`, and duplicate-resolution behavior
 - [x] 2.3 Implement `Re-extract` focus prompts and draft-only field-aware merge behavior
-- [x] 2.4 Implement `parse_alt_tags`, `upsert_alt_tag`, and `strip_alt_tags` helpers and integrate them into re-extract flows
+- [x] 2.4 Implement `parse_alt_tags`, `upsert_alt_tag`, and `strip_alt_tags` in `review_notes` and integrate **`upsert_alt_tag` / `strip_alt_tags`** into re-extract merge (`_merge_reextract_candidate`); callers may use `parse_alt_tags` for tests and UI
 
 ## 3. Verification
 

@@ -31,6 +31,7 @@ from app.pipeline.extraction import (
     discard_record_draft,
     extract_all_pending,
     extract_selected_pending,
+    get_review_draft,
     get_confirmed_save_duplicate_conflict,
     number_markdown_lines,
     open_or_restore_discovery_session,
@@ -314,18 +315,21 @@ class ProductionStage1RequestTests(unittest.TestCase):
         )
 
         messages = request.get("messages")
+        self.assertIsInstance(messages, list)
+        if not isinstance(messages, list):
+            self.fail("Expected Anthropic user message list to be sent.")
+        self.assertEqual(len(messages), 1)
+        message = messages[0]
         self.assertEqual(
             messages,
             [
                 {
                     "role": "user",
-                    "content": messages[0]["content"],
+                    "content": message["content"],
                 }
             ],
         )
-        if not isinstance(messages, list):
-            self.fail("Expected Anthropic user message list to be sent.")
-        user_message = messages[0]["content"]
+        user_message = message["content"]
         self.assertIsInstance(user_message, str)
         if not isinstance(user_message, str):
             self.fail("Expected Anthropic user message content to be a string.")
@@ -2833,6 +2837,64 @@ class Stage2ExtractionTests(unittest.TestCase):
             session_state.records[0].canonical_spell.review_notes or "",
         )
 
+    def test_extract_all_pending_creates_placeholder_when_stage2_payload_is_malformed(self) -> None:
+        session_state = self._build_pending_session()
+        session_state.records = [session_state.records[0]]
+        session_state.selected_spell_id = session_state.records[0].spell_id
+        attempts = 0
+
+        def malformed_stage2_caller(_request: Stage2ExtractionInput) -> str:
+            nonlocal attempts
+            attempts += 1
+            return "not a valid stage2 payload"
+
+        extract_all_pending(
+            session_state,
+            config=AppConfig(stage2_max_attempts=2),
+            stage2_caller=malformed_stage2_caller,
+        )
+
+        self.assertEqual(attempts, 2)
+        self.assertEqual(session_state.records[0].status, SpellRecordStatus.NEEDS_REVIEW)
+        placeholder_spell = session_state.records[0].canonical_spell
+        if placeholder_spell is None:
+            self.fail("Expected placeholder canonical spell after malformed Stage 2 payload retries.")
+        self.assertTrue(placeholder_spell.needs_review)
+        self.assertIn("Stage 2 extraction failed", placeholder_spell.review_notes or "")
+        self.assertIn("failed after 2 attempt(s)", placeholder_spell.review_notes or "")
+
+    def test_extract_all_pending_creates_placeholder_when_stage2_payload_fails_schema_validation(self) -> None:
+        session_state = self._build_pending_session()
+        session_state.records = [session_state.records[0]]
+        session_state.selected_spell_id = session_state.records[0].spell_id
+        attempts = 0
+
+        def invalid_schema_stage2_caller(_request: Stage2ExtractionInput) -> dict[str, object]:
+            nonlocal attempts
+            attempts += 1
+            return {
+                "name": "Schema Failure Spell",
+                "class_list": "Wizard",
+                "level": "not-an-int",
+                "school": [],
+                "components": {"verbal": "yes"},
+            }
+
+        extract_all_pending(
+            session_state,
+            config=AppConfig(stage2_max_attempts=2),
+            stage2_caller=invalid_schema_stage2_caller,
+        )
+
+        self.assertEqual(attempts, 2)
+        self.assertEqual(session_state.records[0].status, SpellRecordStatus.NEEDS_REVIEW)
+        placeholder_spell = session_state.records[0].canonical_spell
+        if placeholder_spell is None:
+            self.fail("Expected placeholder canonical spell after invalid Stage 2 schema retries.")
+        self.assertTrue(placeholder_spell.needs_review)
+        self.assertIn("Stage 2 extraction failed", placeholder_spell.review_notes or "")
+        self.assertIn("failed after 2 attempt(s)", placeholder_spell.review_notes or "")
+
     def test_extract_all_pending_placeholder_clamps_stale_boundaries_for_source_page(self) -> None:
         session_state = self._build_pending_session()
         session_state.records = [session_state.records[0]]
@@ -3260,6 +3322,54 @@ class ReviewFlowServiceTests(unittest.TestCase):
         self.assertTrue(deleted)
         self.assertEqual([record.spell_id for record in session_state.records], ["confirmed-1"])
         self.assertIsNone(session_state.selected_spell_id)
+
+    def test_delete_record_returns_false_when_record_missing(self) -> None:
+        session_state = self._build_review_session()
+        original_record_ids = [record.spell_id for record in session_state.records]
+        original_selected_spell_id = session_state.selected_spell_id
+
+        deleted = delete_record(session_state, spell_id="missing")
+
+        self.assertFalse(deleted)
+        self.assertEqual([record.spell_id for record in session_state.records], original_record_ids)
+        self.assertEqual(session_state.selected_spell_id, original_selected_spell_id)
+
+    def test_get_review_draft_returns_existing_draft_instance(self) -> None:
+        session_state = self._build_review_session()
+        record = session_state.records[0]
+        draft_spell = record.canonical_spell.model_copy(deep=True)
+        draft_spell.range = "75 yards"
+        record.draft_spell = draft_spell
+        record.draft_dirty = True
+
+        result = get_review_draft(record)
+
+        self.assertIs(result, draft_spell)
+        self.assertEqual(result.range, "75 yards")
+
+    def test_get_review_draft_copies_canonical_spell_when_draft_missing(self) -> None:
+        session_state = self._build_review_session()
+        record = session_state.records[0]
+        canonical_spell = record.canonical_spell
+        if canonical_spell is None:
+            self.fail("Expected canonical spell for review record.")
+
+        result = get_review_draft(record)
+        original_school = list(canonical_spell.school)
+        original_components = list(canonical_spell.components)
+        result.range = "120 yards"
+        result.school.append("illusion")
+        result.components.append("M")
+
+        self.assertIsNot(result, canonical_spell)
+        self.assertIsNot(result.school, canonical_spell.school)
+        self.assertIsNot(result.components, canonical_spell.components)
+        self.assertEqual(result.range, "120 yards")
+        self.assertEqual(canonical_spell.range, "30 yards")
+        self.assertEqual(result.school, [*original_school, "illusion"])
+        self.assertEqual(canonical_spell.school, original_school)
+        self.assertEqual(result.components, [*original_components, "M"])
+        self.assertEqual(canonical_spell.components, original_components)
 
     def test_reextract_merges_into_draft_and_records_alt_conflict_candidates(self) -> None:
         session_state = self._build_review_session()
