@@ -4,6 +4,7 @@ import math
 from enum import Enum
 from typing import Any
 
+from app.utils.review_notes import strip_alt_tags
 from pydantic import (
     BaseModel,
     Field,
@@ -115,6 +116,8 @@ def _append_note(existing: str | None, extra: str) -> str:
         return extra_text
     if not extra_text:
         return existing_text
+    if "ALT[" in existing_text and not strip_alt_tags(existing_text):
+        return f"{existing_text}\n{extra_text}"
     if existing_text.endswith((".", "!", "?")):
         return f"{existing_text} {extra_text}"
     return f"{existing_text}; {extra_text}"

@@ -1,0 +1,26 @@
+## {{ spell.name }}
+
+- Tradition: {{ spell.tradition.value }}
+- Class: {{ spell.class_list.value }}
+- Level: {{ level_label }}
+- School: {{ spell.school | join(", ") }}
+{% if spell.sphere %}- Sphere: {{ spell.sphere | join(", ") }}
+{% endif %}- Range: {{ spell.range }}
+- Components: {{ component_values | join(", ") }}
+- Duration: {{ spell.duration }}
+- Casting Time: {{ spell.casting_time }}
+- Area of Effect: {{ spell.area_of_effect }}
+- Saving Throw: {{ spell.saving_throw }}
+- Source: {{ spell.source_document }}{{ ", p. " ~ spell.source_page if spell.source_page is not none else "" }}
+
+{{ spell.description }}
+{% if spell.needs_review or review_notes %}
+
+### Review
+{% if spell.needs_review %}
+Needs review before publication.
+{% endif %}
+{% if review_notes %}
+{{ review_notes }}
+{% endif %}
+{% endif %}
