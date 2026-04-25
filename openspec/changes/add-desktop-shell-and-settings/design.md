@@ -43,11 +43,52 @@ Alternative considered:
 - Split settings across multiple dialogs.
 - Rejected because the current scope does not justify more UI surface.
 
+### Use `QThread` with a `QObject`-based worker for background extraction
+- Each Detect Spells or Extract job runs on a dedicated `QThread`; the shell spawns up to `max_concurrent_extractions` concurrent threads via a coordinator/manager object.
+- Workers emit typed Qt signals (`record_extracted(str)`, `progress_updated(int, int)`, `extraction_cancelled()`, `extraction_failed(str, str)`) that the shell receives on the main thread via the normal signal-slot mechanism.
+- Cancel is implemented by setting a shared `threading.Event` that the worker checks between records; the worker then emits `extraction_cancelled()` and exits cleanly.
+- This avoids asyncio-Qt bridging complexity and keeps all UI updates on the main thread.
+
+Alternative considered:
+- `QThreadPool` / `QRunnable` without typed signals.
+- Rejected because `QRunnable` does not support Qt signals natively; the typed-signal contract is essential for the UI wiring described in this change.
+
+### Render PDF pages via PyMuPDF into `QPixmap`, display in a `QScrollArea`
+- PyMuPDF (`fitz`) renders each page to a pixel matrix; the shell converts it to a `QImage`/`QPixmap` and paints highlight overlays for the selected record's bounding boxes using `QPainter`.
+- The document panel uses a `QScrollArea` containing a `QLabel` (or a minimal `QWidget` subclass) to display the rendered page; scrolling is driven by Qt's native scroll mechanism.
+- On record selection the panel renders the relevant page and scrolls to the highlighted region.
+
+Alternative considered:
+- Qt's built-in `QPdfView` (Qt 6.4+).
+- Rejected because PyMuPDF is already a project dependency and provides the bounding-box data we need for highlight overlays; `QPdfView` would add a Qt version constraint.
+
+### Display DOCX content in a read-only `QTextEdit`
+- DOCX text (already extracted to Markdown during ingestion) is loaded into a `QTextEdit` with `setReadOnly(True)`.
+- Highlight is applied using `QTextEdit`'s extra-selections API (`setExtraSelections`) on the character-offset range from `CoordinateAwareTextMap`.
+
+Alternative considered:
+- `QTextBrowser` (HTML-based rendering).
+- Rejected because we already have plain Markdown text and the extra-selections API on `QTextEdit` is cleaner for programmatic highlight control.
+
+### Settings dialog applies changes only on explicit Save; Cancel discards them
+- The dialog makes a copy of `AppConfig` on open, edits the copy in-memory, and writes to disk only when the user confirms.
+- Changes to `api_key_storage_mode` or the API key do **not** take effect in any running worker; they apply to the next job the user starts.
+
+Alternative considered:
+- Live-apply settings changes immediately.
+- Rejected because changing the model or API key mid-extraction would produce inconsistent results within a single session.
+
+### Export dialog is launched from the shell as a call into the export module
+- The shell's Export toolbar action delegates to the export dialog flow defined in `add-export-capabilities`.
+- In this change the Export action is wired but the dialog itself is owned by the export change; the shell imports it as a dependency.
+- If the export module is not yet integrated, the Export action is shown but disabled with a tooltip "Export not available in this build."
+
 ## Risks / Trade-offs
 
 - The shell touches many UI modules at once → Keep panel responsibilities narrow and use session state as the shared contract.
 - Session restore and file-switch prompts can be easy to get wrong → Cover same-SHA reopen and different-SHA prompt behavior with tests.
-- PDF rendering and highlight overlays can be heavy on large files → Keep rendering and highlight updates incremental.
+- PDF rendering and highlight overlays can be heavy on large files → Keep rendering and highlight updates incremental; render only the visible page.
+- `QThread`-based concurrency introduces cross-thread state mutation risk → Workers must not mutate `SessionState` directly; they emit signals carrying spell IDs or `LaxSpell` payloads, and the main-thread slot applies the mutation via the existing extraction API.
 
 ## Migration Plan
 
@@ -55,4 +96,5 @@ Alternative considered:
 
 ## Open Questions
 
-- None for this change.
+- **Toolbar enable/disable rules for in-progress extraction**: Should all extraction toolbar actions (Detect Spells, Extract Selected, Extract All Pending) be disabled while any worker is running, or only the conflicting ones? Decision deferred to task 2.1; the safe default is to disable all extraction actions during any active worker run.
+- **Focus prompt UI for Re-extract**: The spec requires a focus prompt string. A simple `QInputDialog.getText` call is sufficient for this change; a dedicated inline text field can be added later if UX feedback warrants it.
