@@ -104,6 +104,14 @@ class AppConfigNormalizationTests(unittest.TestCase):
                 self.assertEqual(config.stage1_model, defaults.stage1_model)
                 self.assertEqual(config.stage2_model, defaults.stage2_model)
 
+    def test_last_export_scope_uses_default_for_blank_values(self) -> None:
+        defaults = AppConfig().normalized()
+
+        for raw_value in (None, 123, "", "   "):
+            with self.subTest(raw_value=raw_value):
+                config = AppConfig.from_dict({"last_export_scope": raw_value})
+                self.assertEqual(config.last_export_scope, defaults.last_export_scope)
+
     def test_stage_models_keep_valid_non_empty_string_values(self) -> None:
         config = AppConfig.from_dict(
             {
@@ -165,6 +173,16 @@ class AppConfigPersistenceTests(unittest.TestCase):
 
             self.assertEqual(loaded.stage1_empty_page_cutoff, defaults.stage1_empty_page_cutoff)
             self.assertEqual(loaded.max_concurrent_extractions, defaults.max_concurrent_extractions)
+
+    def test_last_export_scope_round_trips_and_preserves_unknown_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.json"
+            config = AppConfig(last_export_scope="future_scope")
+
+            config.save(config_path)
+            loaded = AppConfig.load(config_path)
+
+        self.assertEqual(loaded.last_export_scope, "future_scope")
 
     def test_save_and_load_round_trip_with_explicit_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

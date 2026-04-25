@@ -243,6 +243,7 @@ class AppConfig:
     tesseract_path: str = ""
     default_source_document: str = "Player's Handbook"
     last_import_directory: str = ""
+    last_export_scope: str = "everything_extracted"
     custom_schools: list[str] = field(default_factory=list)
     custom_spheres: list[str] = field(default_factory=list)
     document_names_by_sha256: dict[str, str] = field(default_factory=dict)
@@ -299,6 +300,10 @@ class AppConfig:
             last_import_directory=_coerce_non_blank_string(
                 self.last_import_directory,
                 default="",
+            ),
+            last_export_scope=_coerce_non_blank_string(
+                self.last_export_scope,
+                default="everything_extracted",
             ),
             custom_schools=_coerce_string_list(self.custom_schools),
             custom_spheres=_coerce_string_list(self.custom_spheres),
