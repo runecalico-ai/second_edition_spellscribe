@@ -116,7 +116,6 @@ def _spell_to_json_dict(spell: Spell) -> dict[str, object]:
     payload.pop("confidence", None)
     payload.pop("extraction_start_line", None)
     payload.pop("extraction_end_line", None)
-    payload["tradition"] = spell.tradition.value
     payload["review_notes"] = _normalized_review_notes(spell.review_notes)
     if spell.class_list.value == "Wizard":
         payload.pop("sphere", None)
@@ -132,7 +131,7 @@ def _write_text_atomic(path: Path, text: str) -> None:
     )
     temp_path = Path(temp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())

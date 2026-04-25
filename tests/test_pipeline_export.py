@@ -411,6 +411,27 @@ class ExportHelperTests(unittest.TestCase):
         ordered = order_spells(records, ExportScope.EVERYTHING_EXTRACTED)
 
         self.assertEqual([spell.name for spell in ordered], ["aardvark", "Zebra", "Late"])
+
+    def test_order_spells_everything_extracted_all_minus_one_lines_tie_break_on_name(self) -> None:
+        records = [
+            _record(
+                spell_id="spell-zebra",
+                status=SpellRecordStatus.CONFIRMED,
+                section_order=0,
+                canonical_spell=_spell(name="Zebra", extraction_start_line=-1),
+            ),
+            _record(
+                spell_id="spell-aardvark",
+                status=SpellRecordStatus.CONFIRMED,
+                section_order=1,
+                canonical_spell=_spell(name="aardvark", extraction_start_line=-1),
+            ),
+        ]
+
+        ordered = order_spells(records, ExportScope.EVERYTHING_EXTRACTED)
+
+        self.assertEqual([spell.name for spell in ordered], ["aardvark", "Zebra"])
+
 class ExportMarkdownTests(unittest.TestCase):
     def test_to_markdown_strips_alt_tags_and_renders_review_section_when_needed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
