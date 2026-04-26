@@ -1,0 +1,1 @@
+"""SpellScribe desktop UI package."""
