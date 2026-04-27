@@ -5,6 +5,7 @@ import os
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -13,6 +14,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QToolBar
 
 from app.models import CoordinateAwareTextMap
+from app.pipeline.identity import DocumentIdentityMetadata
+from app.pipeline.ingestion import RoutedDocument
 from app.session import SpellRecordStatus
 
 # Deferred import so QApplication is created before widgets
@@ -1387,6 +1390,28 @@ class TestWorkers(unittest.TestCase):
 
         self.assertEqual(emitted_counts, [2])
 
+    def test_detect_worker_emits_progress_start_and_completion(self):
+        import threading
+
+        from app.ui.workers import DetectSpellsWorker
+
+        result_session = MagicMock()
+        result_session.records = []
+
+        worker = DetectSpellsWorker(
+            routed_document=MagicMock(),
+            config=MagicMock(),
+            session_state=MagicMock(),
+            cancel_event=threading.Event(),
+        )
+        progress = []
+        worker.progress_updated.connect(lambda current, total: progress.append((current, total)))
+
+        with patch("app.ui.workers.detect_spells", return_value=result_session):
+            worker.run()
+
+        self.assertEqual(progress, [(0, 1), (1, 1)])
+
     def test_detect_worker_emits_failed_on_exception(self):
         import threading
 
@@ -1421,12 +1446,19 @@ class TestWorkers(unittest.TestCase):
             cancel_event=cancel,
         )
         cancelled = []
+        session_ready = []
+        spells_detected = []
         worker.cancelled.connect(lambda: cancelled.append(True))
+        worker.session_ready.connect(lambda s: session_ready.append(s))
+        worker.spells_detected.connect(lambda n: spells_detected.append(n))
 
-        with patch("app.ui.workers.detect_spells", return_value=MagicMock(records=[])):
+        with patch("app.ui.workers.detect_spells", return_value=MagicMock(records=[])) as mock_detect:
             worker.run()
 
         self.assertEqual(cancelled, [True])
+        mock_detect.assert_not_called()
+        self.assertEqual(session_ready, [])
+        self.assertEqual(spells_detected, [])
 
     def test_extract_worker_emits_record_extracted_per_record(self):
         import threading
@@ -1450,7 +1482,7 @@ class TestWorkers(unittest.TestCase):
         r2_result.spell_id = "id-2"
         r2_result.status = MagicMock(value="needs_review")
         result_session = MagicMock()
-        result_session.records = [r1_result, r2_result]
+        result_session.records = [r2_result, r1_result]
 
         worker = ExtractWorker(
             session_state=session,
@@ -1464,7 +1496,114 @@ class TestWorkers(unittest.TestCase):
         with patch("app.ui.workers.extract_all_pending", return_value=result_session):
             worker.run()
 
-        self.assertEqual(sorted(extracted), ["id-1", "id-2"])
+        self.assertEqual(extracted, ["id-2", "id-1"])
+
+    def test_extract_worker_emits_progress_start_and_completion(self):
+        import threading
+
+        from app.ui.workers import ExtractWorker
+
+        pending_one = MagicMock()
+        pending_one.spell_id = "id-1"
+        pending_one.status = MagicMock(value="pending_extraction")
+        pending_two = MagicMock()
+        pending_two.spell_id = "id-2"
+        pending_two.status = MagicMock(value="pending_extraction")
+        session = MagicMock()
+        session.records = [pending_one, pending_two]
+
+        done_one = MagicMock()
+        done_one.spell_id = "id-1"
+        done_one.status = MagicMock(value="needs_review")
+        still_pending = MagicMock()
+        still_pending.spell_id = "id-2"
+        still_pending.status = MagicMock(value="pending_extraction")
+        result_session = MagicMock()
+        result_session.records = [done_one, still_pending]
+
+        worker = ExtractWorker(
+            session_state=session,
+            config=MagicMock(),
+            cancel_event=threading.Event(),
+            mode="all",
+        )
+        progress = []
+        worker.progress_updated.connect(lambda current, total: progress.append((current, total)))
+
+        with patch("app.ui.workers.extract_all_pending", return_value=result_session):
+            worker.run()
+
+        self.assertEqual(progress, [(0, 2), (1, 2)])
+
+    def test_extract_worker_selected_mode_progress_uses_selected_pending_scope(self):
+        import threading
+
+        from app.ui.workers import ExtractWorker
+
+        pending_one = MagicMock()
+        pending_one.spell_id = "id-1"
+        pending_one.status = MagicMock(value="pending_extraction")
+        pending_two = MagicMock()
+        pending_two.spell_id = "id-2"
+        pending_two.status = MagicMock(value="pending_extraction")
+        session = MagicMock()
+        session.records = [pending_one, pending_two]
+        session.selected_spell_id = "id-2"
+
+        still_pending = MagicMock()
+        still_pending.spell_id = "id-1"
+        still_pending.status = MagicMock(value="pending_extraction")
+        selected_done = MagicMock()
+        selected_done.spell_id = "id-2"
+        selected_done.status = MagicMock(value="needs_review")
+        result_session = MagicMock()
+        result_session.records = [still_pending, selected_done]
+
+        worker = ExtractWorker(
+            session_state=session,
+            config=MagicMock(),
+            cancel_event=threading.Event(),
+            mode="selected",
+        )
+        progress = []
+        worker.progress_updated.connect(lambda current, total: progress.append((current, total)))
+
+        with patch("app.ui.workers.extract_selected_pending", return_value=result_session):
+            worker.run()
+
+        self.assertEqual(progress, [(0, 1), (1, 1)])
+
+    def test_extract_worker_selected_mode_progress_zero_when_selected_not_pending(self):
+        import threading
+
+        from app.ui.workers import ExtractWorker
+
+        pending_one = MagicMock()
+        pending_one.spell_id = "id-1"
+        pending_one.status = MagicMock(value="pending_extraction")
+        selected_non_pending = MagicMock()
+        selected_non_pending.spell_id = "id-2"
+        selected_non_pending.status = MagicMock(value="needs_review")
+        session = MagicMock()
+        session.records = [pending_one, selected_non_pending]
+        session.selected_spell_id = "id-2"
+
+        result_session = MagicMock()
+        result_session.records = [pending_one, selected_non_pending]
+
+        worker = ExtractWorker(
+            session_state=session,
+            config=MagicMock(),
+            cancel_event=threading.Event(),
+            mode="selected",
+        )
+        progress = []
+        worker.progress_updated.connect(lambda current, total: progress.append((current, total)))
+
+        with patch("app.ui.workers.extract_selected_pending", return_value=result_session):
+            worker.run()
+
+        self.assertEqual(progress, [(0, 0), (0, 0)])
 
     def test_detect_worker_emits_session_ready_with_result(self):
         import threading
@@ -1510,6 +1649,44 @@ class TestWorkers(unittest.TestCase):
             worker.run()
         self.assertEqual(completed, [result_session])
 
+    def test_extract_worker_emits_final_progress_before_extraction_complete(self):
+        import threading
+
+        from app.ui.workers import ExtractWorker
+
+        pending = MagicMock()
+        pending.spell_id = "id-1"
+        pending.status = MagicMock(value="pending_extraction")
+        extracted = MagicMock()
+        extracted.spell_id = "id-1"
+        extracted.status = MagicMock(value="needs_review")
+
+        session = MagicMock()
+        session.records = [pending]
+
+        result_session = MagicMock()
+        result_session.records = [extracted]
+
+        worker = ExtractWorker(
+            session_state=session,
+            config=MagicMock(),
+            cancel_event=threading.Event(),
+            mode="all",
+        )
+
+        progress = []
+        signal_order = []
+        worker.progress_updated.connect(
+            lambda current, total: (progress.append((current, total)), signal_order.append("progress"))
+        )
+        worker.extraction_complete.connect(lambda _: signal_order.append("extraction_complete"))
+
+        with patch("app.ui.workers.extract_all_pending", return_value=result_session):
+            worker.run()
+
+        self.assertEqual(progress, [(0, 1), (1, 1)])
+        self.assertEqual(signal_order[-2:], ["progress", "extraction_complete"])
+
     def test_extract_worker_calls_extract_selected_in_selected_mode(self):
         import threading
 
@@ -1531,6 +1708,63 @@ class TestWorkers(unittest.TestCase):
             worker.run()
             mock_sel.assert_called_once()
             mock_all.assert_not_called()
+            args, kwargs = mock_sel.call_args
+            self.assertIsNot(args[0], session)
+            self.assertIs(kwargs["config"], worker._config)
+
+    def test_extract_worker_passes_cloned_session_state_to_extract_all(self):
+        import threading
+
+        from app.ui.workers import ExtractWorker
+
+        r1 = MagicMock()
+        r1.spell_id = "id-1"
+        r1.status = MagicMock(value="pending_extraction")
+        session = MagicMock()
+        session.records = [r1]
+        config = MagicMock()
+        result_session = MagicMock()
+        result_session.records = [r1]
+
+        worker = ExtractWorker(
+            session_state=session,
+            config=config,
+            cancel_event=threading.Event(),
+            mode="all",
+        )
+
+        with patch("app.ui.workers.extract_all_pending", return_value=result_session) as mock_extract:
+            worker.run()
+
+        mock_extract.assert_called_once()
+        args, kwargs = mock_extract.call_args
+        self.assertIsNot(args[0], session)
+        self.assertIs(kwargs["config"], config)
+
+    def test_extract_worker_emits_failed_on_exception(self):
+        import threading
+
+        from app.ui.workers import ExtractWorker
+
+        worker = ExtractWorker(
+            session_state=MagicMock(records=[]),
+            config=MagicMock(),
+            cancel_event=threading.Event(),
+            mode="all",
+        )
+        contract_failures = []
+        legacy_failures = []
+        worker.extraction_failed.connect(lambda title, msg: contract_failures.append((title, msg)))
+        worker.failed.connect(lambda title, msg: legacy_failures.append((title, msg)))
+
+        with patch("app.ui.workers.extract_all_pending", side_effect=RuntimeError("boom")):
+            worker.run()
+
+        self.assertEqual(len(contract_failures), 1)
+        self.assertEqual(len(legacy_failures), 1)
+        self.assertIn("Extraction Failed", contract_failures[0][0])
+        self.assertIn("boom", contract_failures[0][1])
+        self.assertEqual(contract_failures, legacy_failures)
 
     def test_extract_worker_cancelled_before_start_does_not_call_extract(self):
         import threading
@@ -1546,18 +1780,21 @@ class TestWorkers(unittest.TestCase):
             mode="all",
         )
         with patch("app.ui.workers.extract_all_pending") as mock_extract:
-            cancelled_calls = []
-            worker.cancelled.connect(lambda: cancelled_calls.append(True))
+            contract_cancelled_calls = []
+            legacy_cancelled_calls = []
+            worker.extraction_cancelled.connect(lambda: contract_cancelled_calls.append(True))
+            worker.cancelled.connect(lambda: legacy_cancelled_calls.append(True))
             worker.run()
         mock_extract.assert_not_called()
-        self.assertEqual(cancelled_calls, [True])
+        self.assertEqual(contract_cancelled_calls, [True])
+        self.assertEqual(legacy_cancelled_calls, [True])
 
     def test_cancel_mid_record_drops_only_inflight_record_deferred(self):
         self.skipTest(
             "Per-record mid-batch cancellation requires streaming callbacks in extraction API."
         )
 
-    def test_extract_worker_cancelled_after_extraction_emits_complete_only(self):
+    def test_extract_worker_cancelled_after_extraction_emits_complete_then_cancelled(self):
         import threading
 
         from app.ui.workers import ExtractWorker
@@ -1568,6 +1805,7 @@ class TestWorkers(unittest.TestCase):
         result_session = MagicMock()
         complete_calls = []
         cancelled_calls = []
+        signal_order = []
 
         def fake_extract(session_state, *, config):
             cancel_event.set()
@@ -1580,13 +1818,18 @@ class TestWorkers(unittest.TestCase):
                 cancel_event=cancel_event,
                 mode="all",
             )
-            worker.extraction_complete.connect(lambda s: complete_calls.append(s))
-            worker.cancelled.connect(lambda: cancelled_calls.append(True))
+            worker.extraction_complete.connect(
+                lambda s: (complete_calls.append(s), signal_order.append("extraction_complete"))
+            )
+            worker.cancelled.connect(
+                lambda: (cancelled_calls.append(True), signal_order.append("cancelled"))
+            )
             worker.run()
         self.assertEqual(complete_calls, [result_session])
-        self.assertEqual(cancelled_calls, [])
+        self.assertEqual(cancelled_calls, [True])
+        self.assertEqual(signal_order, ["extraction_complete", "cancelled"])
 
-    def test_detect_worker_forwards_session_state_to_detect_spells(self):
+    def test_detect_worker_passes_cloned_session_state_to_detect_spells(self):
         import threading
 
         from app.ui.workers import DetectSpellsWorker
@@ -1595,7 +1838,7 @@ class TestWorkers(unittest.TestCase):
         routed = MagicMock()
         config = MagicMock()
         with patch("app.ui.workers.detect_spells") as mock_detect:
-            mock_detect.return_value = MagicMock()
+            mock_detect.return_value = MagicMock(records=[])
             worker = DetectSpellsWorker(
                 routed_document=routed,
                 config=config,
@@ -1603,9 +1846,13 @@ class TestWorkers(unittest.TestCase):
                 cancel_event=threading.Event(),
             )
             worker.run()
-        mock_detect.assert_called_once_with(routed, config=config, session_state=session)
+        mock_detect.assert_called_once()
+        args, kwargs = mock_detect.call_args
+        self.assertIs(args[0], routed)
+        self.assertIs(kwargs["config"], config)
+        self.assertIsNot(kwargs["session_state"], session)
 
-    def test_detect_worker_cancelled_after_detection_emits_session_ready_only(self):
+    def test_detect_worker_cancelled_after_detection_emits_session_ready_then_cancelled(self):
         import threading
 
         from app.ui.workers import DetectSpellsWorker
@@ -1621,7 +1868,9 @@ class TestWorkers(unittest.TestCase):
         r2.status = MagicMock(value="pending_extraction")
         result_session.records = [r1, r2]
         ready_calls = []
+        spells_detected_calls = []
         cancelled_calls = []
+        signal_order = []
 
         def fake_detect(routed_doc, *, config, session_state):
             cancel_event.set()
@@ -1634,11 +1883,20 @@ class TestWorkers(unittest.TestCase):
                 session_state=session,
                 cancel_event=cancel_event,
             )
-            worker.session_ready.connect(lambda s: ready_calls.append(s))
-            worker.cancelled.connect(lambda: cancelled_calls.append(True))
+            worker.session_ready.connect(
+                lambda s: (ready_calls.append(s), signal_order.append("session_ready"))
+            )
+            worker.spells_detected.connect(
+                lambda n: (spells_detected_calls.append(n), signal_order.append("spells_detected"))
+            )
+            worker.cancelled.connect(
+                lambda: (cancelled_calls.append(True), signal_order.append("cancelled"))
+            )
             worker.run()
         self.assertEqual(ready_calls, [result_session])
-        self.assertEqual(cancelled_calls, [])
+        self.assertEqual(spells_detected_calls, [2])
+        self.assertEqual(cancelled_calls, [True])
+        self.assertEqual(signal_order, ["session_ready", "spells_detected", "cancelled"])
 
 
 class TestMainWindowWorkers(unittest.TestCase):
@@ -1684,6 +1942,98 @@ class TestMainWindowWorkers(unittest.TestCase):
         win._on_cancel()
         self.assertTrue(cancel_event.is_set())
 
+    def test_close_event_sets_cancel_and_stops_running_thread(self):
+        import threading
+
+        win = self._make_window_with_session()
+        cancel_event = threading.Event()
+        thread = MagicMock()
+        thread.isRunning.return_value = True
+        thread.wait.return_value = True
+
+        win._worker_running = True
+        win._cancel_event = cancel_event
+        win._active_thread = thread
+
+        event = MagicMock()
+        with patch("app.ui.main_window.QMainWindow.closeEvent") as mock_super_close:
+            win.closeEvent(event)
+
+        self.assertTrue(cancel_event.is_set())
+        thread.quit.assert_called_once_with()
+        thread.wait.assert_called_once_with(2000)
+        event.ignore.assert_not_called()
+        mock_super_close.assert_called_once_with(event)
+
+    def test_close_event_ignores_close_when_thread_wait_times_out(self):
+        import threading
+
+        win = self._make_window_with_session()
+        cancel_event = threading.Event()
+        thread = MagicMock()
+        thread.isRunning.return_value = True
+        thread.wait.return_value = False
+
+        win._worker_running = True
+        win._cancel_event = cancel_event
+        win._active_thread = thread
+
+        event = MagicMock()
+        with patch("app.ui.main_window.QMainWindow.closeEvent") as mock_super_close:
+            win.closeEvent(event)
+
+        self.assertTrue(cancel_event.is_set())
+        thread.quit.assert_called_once_with()
+        thread.wait.assert_called_once_with(2000)
+        event.ignore.assert_called_once_with()
+        thread.terminate.assert_not_called()
+        thread.exit.assert_not_called()
+        mock_super_close.assert_not_called()
+
+    def test_close_event_skips_thread_shutdown_when_thread_not_running(self):
+        import threading
+
+        win = self._make_window_with_session()
+        cancel_event = threading.Event()
+        thread = MagicMock()
+        thread.isRunning.return_value = False
+
+        win._worker_running = True
+        win._cancel_event = cancel_event
+        win._active_thread = thread
+
+        event = MagicMock()
+        with patch("app.ui.main_window.QMainWindow.closeEvent") as mock_super_close:
+            win.closeEvent(event)
+
+        self.assertTrue(cancel_event.is_set())
+        thread.quit.assert_not_called()
+        thread.wait.assert_not_called()
+        mock_super_close.assert_called_once_with(event)
+
+    def test_close_event_waits_for_running_thread_when_worker_flag_is_false(self):
+        import threading
+
+        win = self._make_window_with_session()
+        cancel_event = threading.Event()
+        thread = MagicMock()
+        thread.isRunning.return_value = True
+        thread.wait.return_value = True
+
+        win._worker_running = False
+        win._cancel_event = cancel_event
+        win._active_thread = thread
+
+        event = MagicMock()
+        with patch("app.ui.main_window.QMainWindow.closeEvent") as mock_super_close:
+            win.closeEvent(event)
+
+        self.assertTrue(cancel_event.is_set())
+        thread.quit.assert_called_once_with()
+        thread.wait.assert_called_once_with(2000)
+        event.ignore.assert_not_called()
+        mock_super_close.assert_called_once_with(event)
+
     def test_status_bar_updates_on_spells_detected(self):
         win = self._make_window_with_session()
         mock_panel = MagicMock()
@@ -1725,6 +2075,114 @@ class TestMainWindowWorkers(unittest.TestCase):
             _, kwargs = mock_worker_cls.call_args
             self.assertEqual(kwargs.get("mode"), "selected")
 
+    def test_detect_worker_connects_progress_signal(self):
+        win = self._make_window_with_session()
+        with patch("app.ui.main_window.QThread") as mock_thread_cls, patch(
+            "app.ui.main_window.DetectSpellsWorker"
+        ) as mock_worker_cls:
+            mock_thread = MagicMock()
+            mock_thread_cls.return_value = mock_thread
+            mock_worker = MagicMock()
+            mock_worker_cls.return_value = mock_worker
+
+            win._on_detect_spells()
+
+            mock_worker.progress_updated.connect.assert_any_call(win._on_worker_progress)
+
+    def test_extract_worker_connects_progress_signal(self):
+        win = self._make_window_with_session()
+        with patch("app.ui.main_window.QThread") as mock_thread_cls, patch(
+            "app.ui.main_window.ExtractWorker"
+        ) as mock_worker_cls:
+            mock_thread = MagicMock()
+            mock_thread_cls.return_value = mock_thread
+            mock_worker = MagicMock()
+            mock_worker_cls.return_value = mock_worker
+
+            win._on_extract_all()
+
+            mock_worker.progress_updated.connect.assert_any_call(win._on_worker_progress)
+
+    def test_extract_worker_wires_contract_failure_and_cancel_signals(self):
+        win = self._make_window_with_session()
+        with patch("app.ui.main_window.QThread") as mock_thread_cls, patch(
+            "app.ui.main_window.ExtractWorker"
+        ) as mock_worker_cls:
+            mock_thread = MagicMock()
+            mock_thread_cls.return_value = mock_thread
+
+            mock_worker = MagicMock()
+            mock_worker.record_extracted = MagicMock()
+            mock_worker.extraction_complete = MagicMock()
+            mock_worker.extraction_failed = MagicMock()
+            mock_worker.extraction_cancelled = MagicMock()
+            mock_worker.failed = MagicMock()
+            mock_worker.cancelled = MagicMock()
+            mock_worker_cls.return_value = mock_worker
+
+            win._on_extract_all()
+
+            mock_worker.extraction_failed.connect.assert_any_call(win._on_worker_failed)
+            mock_worker.extraction_cancelled.connect.assert_any_call(win._on_worker_cancelled)
+            mock_worker.extraction_failed.connect.assert_any_call(mock_thread.quit)
+            mock_worker.extraction_cancelled.connect.assert_any_call(mock_thread.quit)
+            mock_worker.failed.connect.assert_not_called()
+            mock_worker.cancelled.connect.assert_not_called()
+
+    def test_extract_worker_wires_contract_signals_when_legacy_missing(self):
+        win = self._make_window_with_session()
+        with patch("app.ui.main_window.QThread") as mock_thread_cls, patch(
+            "app.ui.main_window.ExtractWorker"
+        ) as mock_worker_cls:
+            mock_thread = MagicMock()
+            mock_thread_cls.return_value = mock_thread
+
+            mock_worker = SimpleNamespace(
+                record_extracted=MagicMock(),
+                extraction_complete=MagicMock(),
+                extraction_failed=MagicMock(),
+                extraction_cancelled=MagicMock(),
+                progress_updated=MagicMock(),
+                moveToThread=MagicMock(),
+                run=MagicMock(),
+                deleteLater=MagicMock(),
+            )
+            mock_worker_cls.return_value = mock_worker
+
+            win._on_extract_all()
+
+            mock_worker.extraction_failed.connect.assert_any_call(win._on_worker_failed)
+            mock_worker.extraction_cancelled.connect.assert_any_call(win._on_worker_cancelled)
+            mock_worker.extraction_failed.connect.assert_any_call(mock_thread.quit)
+            mock_worker.extraction_cancelled.connect.assert_any_call(mock_thread.quit)
+
+    def test_extract_worker_wires_legacy_signals_when_contract_missing(self):
+        win = self._make_window_with_session()
+        with patch("app.ui.main_window.QThread") as mock_thread_cls, patch(
+            "app.ui.main_window.ExtractWorker"
+        ) as mock_worker_cls:
+            mock_thread = MagicMock()
+            mock_thread_cls.return_value = mock_thread
+
+            mock_worker = SimpleNamespace(
+                record_extracted=MagicMock(),
+                extraction_complete=MagicMock(),
+                failed=MagicMock(),
+                cancelled=MagicMock(),
+                progress_updated=MagicMock(),
+                moveToThread=MagicMock(),
+                run=MagicMock(),
+                deleteLater=MagicMock(),
+            )
+            mock_worker_cls.return_value = mock_worker
+
+            win._on_extract_all()
+
+            mock_worker.failed.connect.assert_any_call(win._on_worker_failed)
+            mock_worker.cancelled.connect.assert_any_call(win._on_worker_cancelled)
+            mock_worker.failed.connect.assert_any_call(mock_thread.quit)
+            mock_worker.cancelled.connect.assert_any_call(mock_thread.quit)
+
     def test_extraction_complete_refreshes_spell_list(self):
         win = self._make_window_with_session()
         mock_panel = MagicMock()
@@ -1749,6 +2207,110 @@ class TestMainWindowWorkers(unittest.TestCase):
         win._on_extraction_complete(updated_session)
         self.assertNotEqual(win._status_bar.currentMessage(), "")
 
+    def test_no_op_selected_run_reports_zero_extracted(self):
+        win = self._make_window_with_session()
+        win._spell_list_panel = MagicMock()
+
+        confirmed = MagicMock()
+        confirmed.spell_id = "id-confirmed"
+        confirmed.status = MagicMock(value="confirmed")
+
+        pending = MagicMock()
+        pending.spell_id = "id-pending"
+        pending.status = MagicMock(value="pending_extraction")
+
+        win._session.records = [confirmed, pending]
+        win._session.selected_spell_id = "id-confirmed"
+
+        with patch("app.ui.main_window.QThread") as mock_thread_cls, patch(
+            "app.ui.main_window.ExtractWorker"
+        ) as mock_worker_cls:
+            mock_thread_cls.return_value = MagicMock()
+            mock_worker_cls.return_value = MagicMock()
+            win._start_extract_worker(mode="selected")
+
+        updated_session = MagicMock()
+        updated_session.records = [confirmed, pending]
+        updated_session.last_open_path = "/tmp/test.pdf"
+        updated_session.selected_spell_id = "id-confirmed"
+
+        win._on_extraction_complete(updated_session)
+
+        self.assertIn("0 spell(s) extracted", win._status_bar.currentMessage())
+
+    def test_extract_worker_signal_order_keeps_completion_status_final_after_cancel(self):
+        import threading
+
+        from app.ui.workers import ExtractWorker
+
+        win = self._make_window_with_session()
+        win._spell_list_panel = MagicMock()
+
+        pending = MagicMock()
+        pending.spell_id = "id-1"
+        pending.status = MagicMock(value="pending_extraction")
+
+        extracted = MagicMock()
+        extracted.spell_id = "id-1"
+        extracted.status = MagicMock(value="needs_review")
+
+        session = MagicMock()
+        session.records = [pending]
+        session.selected_spell_id = None
+        session.last_open_path = "/tmp/test.pdf"
+
+        updated_session = MagicMock()
+        updated_session.records = [extracted]
+        updated_session.selected_spell_id = None
+        updated_session.last_open_path = "/tmp/test.pdf"
+
+        cancel_event = threading.Event()
+
+        worker = ExtractWorker(
+            session_state=session,
+            config=MagicMock(),
+            cancel_event=cancel_event,
+            mode="all",
+        )
+
+        # Mirror active extraction state so cancellation handler takes real branch.
+        win._worker_running = True
+        win._extract_scope_spell_ids = {"id-1"}
+        cancel_handler = MagicMock(wraps=win._on_worker_cancelled)
+
+        worker.progress_updated.connect(win._on_worker_progress)
+        worker.extraction_complete.connect(win._on_extraction_complete)
+        worker.extraction_cancelled.connect(cancel_handler)
+
+        def _extract_and_cancel(session_state, *, config):
+            del session_state, config
+            cancel_event.set()
+            return updated_session
+
+        with patch("app.ui.workers.extract_all_pending", side_effect=_extract_and_cancel):
+            worker.run()
+
+        cancel_handler.assert_called_once_with()
+        self.assertTrue(cancel_event.is_set())
+        self.assertIn("Extraction complete - 1 spell(s) extracted.", win._status_bar.currentMessage())
+        self.assertNotIn("Operation cancelled.", win._status_bar.currentMessage())
+
+    def test_worker_progress_status_bar_message_with_known_total(self):
+        win = self._make_window_with_session()
+
+        win._on_worker_progress(2, 5)
+
+        self.assertIn("2/5", win._status_bar.currentMessage())
+        self.assertIn("40%", win._status_bar.currentMessage())
+
+    def test_worker_progress_status_bar_message_with_zero_total(self):
+        win = self._make_window_with_session()
+
+        win._on_worker_progress(3, 0)
+
+        self.assertIn("3 item(s) complete", win._status_bar.currentMessage())
+        self.assertIn("unknown", win._status_bar.currentMessage().lower())
+
 
 class TestDocumentOpenFlow(unittest.TestCase):
     @classmethod
@@ -1772,22 +2334,36 @@ class TestDocumentOpenFlow(unittest.TestCase):
         existing_session.last_open_path = "/old/path.pdf"
         existing_session.records = []
         win._session = existing_session
+        win._routed_document = RoutedDocument(
+            source_path=Path("/old/path.pdf"),
+            source_sha256_hex="a" * 64,
+            file_type="pdf",
+            ingestion_mode="pdf_digital",
+            markdown_text="",
+            coordinate_map=CoordinateAwareTextMap(lines=[]),
+            default_source_pages=[],
+            identity=DocumentIdentityMetadata(
+                source_sha256_hex="a" * 64,
+                source_display_name="Player's Handbook",
+                page_offset=0,
+                force_ocr=False,
+            ),
+        )
 
         same_path = "/new/same-file.pdf"
         with patch("app.ui.main_window.compute_sha256_hex", return_value="a" * 64), patch(
             "app.ui.main_window.route_document"
-        ) as mock_route, patch(
-            "app.ui.main_window.restore_session_state_for_source", return_value=existing_session
-        ):
-            routed = MagicMock()
-            routed.coordinate_map = CoordinateAwareTextMap(lines=[])
-            mock_route.return_value = routed
+        ) as mock_route:
             win._open_document(same_path)
 
+        mock_route.assert_not_called()
         self.assertIn("same-file.pdf", win.windowTitle())
         self.assertIn(Path(same_path).name, win._status_bar.currentMessage())
         self.assertIs(win._session, existing_session)
         self.assertEqual(win._session.last_open_path, same_path)
+        self.assertEqual(win._routed_document.source_path, Path(same_path))
+        self.assertEqual(win._config.last_import_directory, str(Path(same_path).parent))
+        win._config.save.assert_called_once()
 
     def test_identity_dialog_abort_leaves_session_unchanged(self):
         win = self._make_window()
@@ -1807,6 +2383,309 @@ class TestDocumentOpenFlow(unittest.TestCase):
             mock_route.assert_not_called()
 
         self.assertIs(win._session, original_session)
+        win._config.save.assert_not_called()
+
+    def test_restored_session_with_unknown_sha_prompts_identity_before_routing(self):
+        win = self._make_window()
+        restored_session = MagicMock()
+        restored_session.records = []
+        restored_session.selected_spell_id = None
+        new_sha = "b" * 64
+        dialog_executed = False
+        observed_events = []
+
+        class _ObservedMap(dict):
+            def __setitem__(self, key, value):
+                observed_events.append(("identity_name_set", key, value))
+                super().__setitem__(key, value)
+
+        win._config.document_names_by_sha256 = _ObservedMap()
+
+        routed = MagicMock()
+        routed.coordinate_map = CoordinateAwareTextMap(lines=[])
+
+        with patch("app.ui.main_window.compute_sha256_hex", return_value=new_sha), patch(
+            "app.ui.main_window.restore_session_state_for_source", return_value=restored_session
+        ), patch("app.ui.main_window.DocumentIdentityDialog") as mock_dlg_cls, patch(
+            "app.ui.main_window.route_document"
+        ) as mock_route:
+            mock_dlg = MagicMock()
+            mock_dlg_cls.return_value = mock_dlg
+
+            def _exec_dialog():
+                nonlocal dialog_executed
+                dialog_executed = True
+                return QDialog.DialogCode.Accepted
+
+            mock_dlg.exec.side_effect = _exec_dialog
+            mock_dlg.get_result.return_value = SimpleNamespace(
+                source_display_name="Player's Handbook",
+                page_offset=2,
+                force_ocr=True,
+            )
+
+            def _route_document(*_args, **kwargs):
+                observed_events.append(("route_called",))
+                self.assertTrue(dialog_executed)
+                self.assertIs(kwargs.get("config"), win._config)
+                self.assertEqual(
+                    win._config.document_names_by_sha256[new_sha],
+                    "Player's Handbook",
+                )
+                self.assertEqual(win._config.document_offsets[new_sha], 2)
+                self.assertTrue(win._config.force_ocr_by_sha256[new_sha])
+                return routed
+
+            mock_route.side_effect = _route_document
+
+            win._open_document("/some/new-file.pdf")
+
+        mock_dlg_cls.assert_called_once()
+        mock_route.assert_called_once()
+
+        name_set_index = observed_events.index(
+            ("identity_name_set", new_sha, "Player's Handbook")
+        )
+        route_called_index = observed_events.index(("route_called",))
+        self.assertLess(name_set_index, route_called_index)
+
+        self.assertEqual(
+            win._config.document_names_by_sha256[new_sha],
+            "Player's Handbook",
+        )
+        self.assertEqual(win._config.document_offsets[new_sha], 2)
+        self.assertTrue(win._config.force_ocr_by_sha256[new_sha])
+        self.assertIs(win._session, restored_session)
+        win._config.save.assert_called_once()
+
+    def test_identity_staging_rolls_back_when_routing_fails(self):
+        win = self._make_window()
+        original_session = MagicMock()
+        original_session.source_sha256_hex = "a" * 64
+        win._session = original_session
+
+        new_sha = "d" * 64
+        win._config.document_offsets[new_sha] = 9
+        win._config.force_ocr_by_sha256[new_sha] = False
+
+        with patch("app.ui.main_window.compute_sha256_hex", return_value=new_sha), patch(
+            "app.ui.main_window.restore_session_state_for_source", return_value=None
+        ), patch("app.ui.main_window.DocumentIdentityDialog") as mock_dlg_cls, patch(
+            "app.ui.main_window.route_document",
+            side_effect=RuntimeError("route failed"),
+        ) as mock_route, patch("app.ui.main_window.QMessageBox.critical") as mock_critical:
+            mock_dlg = MagicMock()
+            mock_dlg_cls.return_value = mock_dlg
+            mock_dlg.exec.return_value = QDialog.DialogCode.Accepted
+            mock_dlg.get_result.return_value = SimpleNamespace(
+                source_display_name="Dungeon Master's Guide",
+                page_offset=2,
+                force_ocr=True,
+            )
+
+            win._open_document("/some/new-file.pdf")
+
+        mock_route.assert_called_once()
+        mock_critical.assert_called_once()
+        self.assertNotIn(new_sha, win._config.document_names_by_sha256)
+        self.assertEqual(win._config.document_offsets[new_sha], 9)
+        self.assertFalse(win._config.force_ocr_by_sha256[new_sha])
+        self.assertIs(win._session, original_session)
+        win._config.save.assert_not_called()
+
+    def test_blank_identity_name_falls_back_to_default_source_document_when_stored(self):
+        win = self._make_window()
+        restored_session = MagicMock()
+        restored_session.records = []
+        restored_session.selected_spell_id = None
+        new_sha = "c" * 64
+
+        routed = MagicMock()
+        routed.coordinate_map = CoordinateAwareTextMap(lines=[])
+
+        with patch("app.ui.main_window.compute_sha256_hex", return_value=new_sha), patch(
+            "app.ui.main_window.restore_session_state_for_source", return_value=restored_session
+        ), patch("app.ui.main_window.DocumentIdentityDialog") as mock_dlg_cls, patch(
+            "app.ui.main_window.route_document", return_value=routed
+        ):
+            mock_dlg = MagicMock()
+            mock_dlg_cls.return_value = mock_dlg
+            mock_dlg.exec.return_value = QDialog.DialogCode.Accepted
+            mock_dlg.get_result.return_value = SimpleNamespace(
+                source_display_name="",
+                page_offset=0,
+                force_ocr=False,
+            )
+
+            win._open_document("/some/blank-name.pdf")
+
+        self.assertEqual(
+            win._config.document_names_by_sha256[new_sha],
+            win._config.default_source_document,
+        )
+        self.assertIs(win._session, restored_session)
+        win._config.save.assert_called_once()
+
+    def test_identity_page_offset_zero_clears_stale_offset_after_successful_open(self):
+        win = self._make_window()
+        restored_session = MagicMock()
+        restored_session.records = []
+        restored_session.selected_spell_id = None
+        new_sha = "e" * 64
+        win._config.document_offsets[new_sha] = 7
+        saw_offset_at_route = None
+
+        routed = MagicMock()
+        routed.coordinate_map = CoordinateAwareTextMap(lines=[])
+
+        with patch("app.ui.main_window.compute_sha256_hex", return_value=new_sha), patch(
+            "app.ui.main_window.restore_session_state_for_source", return_value=restored_session
+        ), patch("app.ui.main_window.DocumentIdentityDialog") as mock_dlg_cls, patch(
+            "app.ui.main_window.route_document"
+        ) as mock_route:
+            mock_dlg = MagicMock()
+            mock_dlg_cls.return_value = mock_dlg
+            mock_dlg.exec.return_value = QDialog.DialogCode.Accepted
+            mock_dlg.get_result.return_value = SimpleNamespace(
+                source_display_name="Monster Manual",
+                page_offset=0,
+                force_ocr=False,
+            )
+
+            def _route_document(*_args, **_kwargs):
+                nonlocal saw_offset_at_route
+                saw_offset_at_route = new_sha in win._config.document_offsets
+                return routed
+
+            mock_route.side_effect = _route_document
+
+            win._open_document("/some/offset-zero.pdf")
+
+        self.assertFalse(saw_offset_at_route)
+        self.assertNotIn(new_sha, win._config.document_offsets)
+        self.assertIs(win._session, restored_session)
+        win._config.save.assert_called_once()
+
+    def test_identity_offset_clear_rolls_back_when_routing_fails(self):
+        win = self._make_window()
+        original_session = MagicMock()
+        original_session.source_sha256_hex = "a" * 64
+        win._session = original_session
+
+        new_sha = "f" * 64
+        win._config.document_offsets[new_sha] = 9
+        saw_offset_at_route = None
+
+        with patch("app.ui.main_window.compute_sha256_hex", return_value=new_sha), patch(
+            "app.ui.main_window.restore_session_state_for_source", return_value=None
+        ), patch("app.ui.main_window.DocumentIdentityDialog") as mock_dlg_cls, patch(
+            "app.ui.main_window.route_document"
+        ) as mock_route, patch("app.ui.main_window.QMessageBox.critical") as mock_critical:
+            mock_dlg = MagicMock()
+            mock_dlg_cls.return_value = mock_dlg
+            mock_dlg.exec.return_value = QDialog.DialogCode.Accepted
+            mock_dlg.get_result.return_value = SimpleNamespace(
+                source_display_name="Dungeon Master's Guide",
+                page_offset=0,
+                force_ocr=False,
+            )
+
+            def _route_document(*_args, **_kwargs):
+                nonlocal saw_offset_at_route
+                saw_offset_at_route = new_sha in win._config.document_offsets
+                raise RuntimeError("route failed")
+
+            mock_route.side_effect = _route_document
+
+            win._open_document("/some/offset-zero-fail.pdf")
+
+        mock_route.assert_called_once()
+        mock_critical.assert_called_once()
+        self.assertFalse(saw_offset_at_route)
+        self.assertNotIn(new_sha, win._config.document_names_by_sha256)
+        self.assertEqual(win._config.document_offsets[new_sha], 9)
+        self.assertIs(win._session, original_session)
+        win._config.save.assert_not_called()
+
+    def test_identity_force_ocr_false_clears_stale_force_ocr_after_successful_open(self):
+        win = self._make_window()
+        restored_session = MagicMock()
+        restored_session.records = []
+        restored_session.selected_spell_id = None
+        new_sha = "1" * 64
+        win._config.force_ocr_by_sha256[new_sha] = True
+        saw_force_ocr_at_route = None
+
+        routed = MagicMock()
+        routed.coordinate_map = CoordinateAwareTextMap(lines=[])
+
+        with patch("app.ui.main_window.compute_sha256_hex", return_value=new_sha), patch(
+            "app.ui.main_window.restore_session_state_for_source", return_value=restored_session
+        ), patch("app.ui.main_window.DocumentIdentityDialog") as mock_dlg_cls, patch(
+            "app.ui.main_window.route_document"
+        ) as mock_route:
+            mock_dlg = MagicMock()
+            mock_dlg_cls.return_value = mock_dlg
+            mock_dlg.exec.return_value = QDialog.DialogCode.Accepted
+            mock_dlg.get_result.return_value = SimpleNamespace(
+                source_display_name="Monster Manual",
+                page_offset=0,
+                force_ocr=False,
+            )
+
+            def _route_document(*_args, **_kwargs):
+                nonlocal saw_force_ocr_at_route
+                saw_force_ocr_at_route = new_sha in win._config.force_ocr_by_sha256
+                return routed
+
+            mock_route.side_effect = _route_document
+
+            win._open_document("/some/force-ocr-false.pdf")
+
+        self.assertFalse(saw_force_ocr_at_route)
+        self.assertNotIn(new_sha, win._config.force_ocr_by_sha256)
+        self.assertIs(win._session, restored_session)
+        win._config.save.assert_called_once()
+
+    def test_identity_force_ocr_clear_rolls_back_when_routing_fails(self):
+        win = self._make_window()
+        original_session = MagicMock()
+        original_session.source_sha256_hex = "a" * 64
+        win._session = original_session
+
+        new_sha = "2" * 64
+        win._config.force_ocr_by_sha256[new_sha] = True
+        saw_force_ocr_at_route = None
+
+        with patch("app.ui.main_window.compute_sha256_hex", return_value=new_sha), patch(
+            "app.ui.main_window.restore_session_state_for_source", return_value=None
+        ), patch("app.ui.main_window.DocumentIdentityDialog") as mock_dlg_cls, patch(
+            "app.ui.main_window.route_document"
+        ) as mock_route, patch("app.ui.main_window.QMessageBox.critical") as mock_critical:
+            mock_dlg = MagicMock()
+            mock_dlg_cls.return_value = mock_dlg
+            mock_dlg.exec.return_value = QDialog.DialogCode.Accepted
+            mock_dlg.get_result.return_value = SimpleNamespace(
+                source_display_name="Dungeon Master's Guide",
+                page_offset=0,
+                force_ocr=False,
+            )
+
+            def _route_document(*_args, **_kwargs):
+                nonlocal saw_force_ocr_at_route
+                saw_force_ocr_at_route = new_sha in win._config.force_ocr_by_sha256
+                raise RuntimeError("route failed")
+
+            mock_route.side_effect = _route_document
+
+            win._open_document("/some/force-ocr-false-fail.pdf")
+
+        mock_route.assert_called_once()
+        mock_critical.assert_called_once()
+        self.assertFalse(saw_force_ocr_at_route)
+        self.assertTrue(win._config.force_ocr_by_sha256[new_sha])
+        self.assertIs(win._session, original_session)
+        win._config.save.assert_not_called()
 
     def test_different_sha_prompt_has_three_choices(self):
         win = self._make_window()
@@ -1943,6 +2822,19 @@ class TestIdentityDialog(unittest.TestCase):
         self.assertIsInstance(result, DocumentIdentityInput)
         self.assertEqual(result.source_display_name, "Monster Manual")
         self.assertEqual(result.page_offset, 10)
+
+    def test_accepted_dialog_allows_negative_page_offset(self):
+        from app.ui.identity_dialog import DocumentIdentityDialog
+
+        dlg = DocumentIdentityDialog(
+            sha256_hex="a" * 64,
+            default_document_name="PHB",
+        )
+        dlg._offset_spin.setValue(-3)
+
+        result = dlg.get_result()
+
+        self.assertEqual(result.page_offset, -3)
 
 
 class TestMainWindowPanelWiring(unittest.TestCase):
