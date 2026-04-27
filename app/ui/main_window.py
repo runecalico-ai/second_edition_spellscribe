@@ -129,14 +129,33 @@ class SpellScribeMainWindow(QMainWindow):
         filename = Path(source_path).name
         self.setWindowTitle(f"{filename} - SpellScribe")
         self._update_action_states()
-        self._spell_list_panel.refresh(session)
+        self._refresh_panels_from_session_selection()
 
     def _on_review_session_changed(self, updated_session: SessionState) -> None:
         self._session = updated_session
-        self._spell_list_panel.refresh(updated_session)
+        self._refresh_panels_from_session_selection()
+
+    def _refresh_panels_from_session_selection(self) -> None:
+        if self._session is None:
+            return
+
+        restored_spell_id = self._spell_list_panel.refresh(
+            self._session,
+            selected_spell_id=self._session.selected_spell_id,
+        )
+        if restored_spell_id is None:
+            self._on_spell_selected("")
+            return
+        self._on_spell_selected(restored_spell_id)
 
     def _on_spell_selected(self, spell_id: str) -> None:
         if self._session is None:
+            return
+
+        if spell_id == "":
+            self._session.selected_spell_id = None
+            self._review_panel.show_placeholder()
+            self._doc_panel.show_placeholder()
             return
 
         record = next((r for r in self._session.records if r.spell_id == spell_id), None)
@@ -381,7 +400,7 @@ class SpellScribeMainWindow(QMainWindow):
             f"Detection complete - {count} spell(s) pending extraction."
         )
         if hasattr(self, "_spell_list_panel") and self._session is not None:
-            self._spell_list_panel.refresh(self._session)
+            self._refresh_panels_from_session_selection()
 
     def _on_record_extracted(self, spell_id: str) -> None:
         self._status_bar.showMessage(f"Extracted: {spell_id}")
@@ -401,7 +420,7 @@ class SpellScribeMainWindow(QMainWindow):
             f"Extraction complete - {extracted_count} spell(s) extracted."
         )
         if hasattr(self, "_spell_list_panel"):
-            self._spell_list_panel.refresh(updated_session)
+            self._refresh_panels_from_session_selection()
 
     def _on_worker_failed(self, title: str, message: str) -> None:
         self._active_worker = None

@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import os
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox, QToolBar
 
 from app.models import CoordinateAwareTextMap
+from app.session import SpellRecordStatus
 
 # Deferred import so QApplication is created before widgets
 _app: QApplication | None = None
@@ -21,6 +24,26 @@ def _get_app() -> QApplication:
     if _app is None:
         _app = QApplication.instance() or QApplication([])
     return _app
+
+
+@dataclass(slots=True)
+class _SpellListFixtureSpell:
+    name: str
+
+
+@dataclass(slots=True)
+class _SpellListFixtureRecord:
+    spell_id: str
+    status: SpellRecordStatus
+    canonical_spell: _SpellListFixtureSpell | None
+    draft_spell: _SpellListFixtureSpell | None
+    section_order: int
+
+
+@dataclass(slots=True)
+class _SpellListFixtureSession:
+    records: list[_SpellListFixtureRecord]
+    selected_spell_id: str | None = None
 
 
 class TestMainWindowToolbar(unittest.TestCase):
@@ -183,22 +206,29 @@ class TestSpellListPanel(unittest.TestCase):
         return SpellListPanel()
 
     def _make_session(self, records):
-        session = MagicMock()
-        session.records = records
-        session.selected_spell_id = None
-        return session
+        return _SpellListFixtureSession(records=records)
 
-    def _make_record(self, spell_id, status_value, name="Magic Missile"):
-        record = MagicMock()
-        record.spell_id = spell_id
-        record.status = MagicMock()
-        record.status.value = status_value
-        spell = MagicMock()
-        spell.name = name
-        record.canonical_spell = spell
-        record.draft_spell = spell
-        record.section_order = 0
-        return record
+    def _make_record(self, spell_id, status_value, name="Magic Missile", section_order=0):
+        status = SpellRecordStatus(status_value)
+        spell = _SpellListFixtureSpell(name=name)
+
+        if status == SpellRecordStatus.CONFIRMED:
+            canonical_spell = spell
+            draft_spell = spell
+        elif status == SpellRecordStatus.NEEDS_REVIEW:
+            canonical_spell = None
+            draft_spell = spell
+        else:
+            canonical_spell = None
+            draft_spell = None
+
+        return _SpellListFixtureRecord(
+            spell_id=spell_id,
+            status=status,
+            canonical_spell=canonical_spell,
+            draft_spell=draft_spell,
+            section_order=section_order,
+        )
 
     def test_panel_starts_empty(self):
         panel = self._make_panel()
@@ -212,8 +242,6 @@ class TestSpellListPanel(unittest.TestCase):
     def test_refresh_populates_confirmed_section(self):
         panel = self._make_panel()
         r = self._make_record("id-1", "confirmed", "Fireball")
-        r.status = MagicMock(value="confirmed")
-        r.canonical_spell.name = "Fireball"
         session = self._make_session([r])
         panel.refresh(session)
         self.assertEqual(panel._confirmed_list.count(), 1)
@@ -222,8 +250,6 @@ class TestSpellListPanel(unittest.TestCase):
     def test_refresh_populates_needs_review_section(self):
         panel = self._make_panel()
         r = self._make_record("id-2", "needs_review", "Sleep")
-        r.status = MagicMock(value="needs_review")
-        r.draft_spell.name = "Sleep"
         session = self._make_session([r])
         panel.refresh(session)
         self.assertEqual(panel._needs_review_list.count(), 1)
@@ -231,9 +257,6 @@ class TestSpellListPanel(unittest.TestCase):
     def test_refresh_populates_pending_section(self):
         panel = self._make_panel()
         r = self._make_record("id-3", "pending_extraction", "Unknown")
-        r.status = MagicMock(value="pending_extraction")
-        r.canonical_spell = None
-        r.draft_spell = None
         session = self._make_session([r])
         panel.refresh(session)
         self.assertEqual(panel._pending_list.count(), 1)
@@ -241,8 +264,6 @@ class TestSpellListPanel(unittest.TestCase):
     def test_selection_emits_spell_id_signal(self):
         panel = self._make_panel()
         r = self._make_record("id-1", "confirmed", "Fireball")
-        r.status = MagicMock(value="confirmed")
-        r.canonical_spell.name = "Fireball"
         session = self._make_session([r])
         panel.refresh(session)
 
@@ -250,6 +271,178 @@ class TestSpellListPanel(unittest.TestCase):
         panel.selected_spell_id_changed.connect(lambda sid: emitted.append(sid))
         panel._confirmed_list.setCurrentRow(0)
         self.assertEqual(emitted, ["id-1"])
+
+    def test_clearing_last_selection_emits_empty_spell_id_signal(self):
+        panel = self._make_panel()
+        r = self._make_record("id-1", "confirmed", "Fireball")
+        session = self._make_session([r])
+        panel.refresh(session)
+
+        emitted = []
+        panel.selected_spell_id_changed.connect(lambda sid: emitted.append(sid))
+
+        panel._confirmed_list.setCurrentRow(0)
+        panel._confirmed_list.clearSelection()
+
+        self.assertEqual(emitted, ["id-1", ""])
+
+    def test_switching_lists_does_not_emit_empty_spell_id_signal(self):
+        panel = self._make_panel()
+        confirmed = self._make_record("id-confirmed", "confirmed", "Fireball")
+        needs_review = self._make_record("id-review", "needs_review", "Sleep")
+
+        panel.refresh(self._make_session([confirmed, needs_review]))
+
+        emitted = []
+        panel.selected_spell_id_changed.connect(lambda sid: emitted.append(sid))
+
+        panel._confirmed_list.setCurrentRow(0)
+        panel._needs_review_list.setCurrentRow(0)
+
+        self.assertEqual(emitted, ["id-confirmed", "id-review"])
+        self.assertNotIn("", emitted)
+
+    def test_refresh_preserves_selection_when_spell_still_exists(self):
+        panel = self._make_panel()
+        confirmed = self._make_record("id-confirmed", "confirmed", "Fireball")
+
+        panel.refresh(self._make_session([confirmed]))
+
+        emitted = []
+        panel.selected_spell_id_changed.connect(lambda sid: emitted.append(sid))
+
+        panel._confirmed_list.setCurrentRow(0)
+        self.assertEqual(len(panel._confirmed_list.selectedItems()), 1)
+
+        panel.refresh(self._make_session([confirmed]))
+
+        total_selected = (
+            len(panel._confirmed_list.selectedItems())
+            + len(panel._needs_review_list.selectedItems())
+            + len(panel._pending_list.selectedItems())
+        )
+        self.assertEqual(total_selected, 1)
+        self.assertEqual(
+            panel._confirmed_list.selectedItems()[0].data(Qt.ItemDataRole.UserRole),
+            "id-confirmed",
+        )
+        self.assertEqual(emitted, ["id-confirmed"])
+
+    def test_refresh_emits_empty_when_selected_spell_is_removed(self):
+        panel = self._make_panel()
+        confirmed = self._make_record("id-confirmed", "confirmed", "Fireball")
+
+        panel.refresh(self._make_session([confirmed]))
+
+        emitted = []
+        panel.selected_spell_id_changed.connect(lambda sid: emitted.append(sid))
+
+        panel._confirmed_list.setCurrentRow(0)
+        self.assertEqual(len(panel._confirmed_list.selectedItems()), 1)
+
+        panel.refresh(self._make_session([]))
+
+        total_selected = (
+            len(panel._confirmed_list.selectedItems())
+            + len(panel._needs_review_list.selectedItems())
+            + len(panel._pending_list.selectedItems())
+        )
+        self.assertEqual(total_selected, 0)
+        self.assertEqual(emitted, ["id-confirmed", ""])
+
+    def test_refresh_sorts_by_section_order_within_status_bucket(self):
+        panel = self._make_panel()
+        first = self._make_record("id-1", "confirmed", "First", section_order=1)
+        second = self._make_record("id-2", "confirmed", "Second", section_order=2)
+        pending_first = self._make_record(
+            "12345678-aaa", "pending_extraction", section_order=3
+        )
+        pending_second = self._make_record(
+            "abcdef12-bbb", "pending_extraction", section_order=4
+        )
+
+        session = self._make_session([second, pending_second, first, pending_first])
+        panel.refresh(session)
+
+        self.assertEqual(panel._confirmed_list.item(0).text(), "First")
+        self.assertEqual(panel._confirmed_list.item(1).text(), "Second")
+        self.assertEqual(panel._pending_list.item(0).text(), "[Pending] 12345678")
+        self.assertEqual(panel._pending_list.item(1).text(), "[Pending] abcdef12")
+
+    def test_items_store_spell_id_in_user_role(self):
+        panel = self._make_panel()
+        confirmed = self._make_record("id-confirmed", "confirmed", "Fireball")
+        needs_review = self._make_record("id-review", "needs_review", "Sleep")
+        pending = self._make_record("1234567890ab", "pending_extraction")
+
+        panel.refresh(self._make_session([confirmed, needs_review, pending]))
+
+        self.assertEqual(
+            panel._confirmed_list.item(0).data(Qt.ItemDataRole.UserRole), "id-confirmed"
+        )
+        self.assertEqual(
+            panel._needs_review_list.item(0).data(Qt.ItemDataRole.UserRole), "id-review"
+        )
+        self.assertEqual(
+            panel._pending_list.item(0).data(Qt.ItemDataRole.UserRole), "1234567890ab"
+        )
+
+    def test_selecting_one_list_clears_selection_in_other_lists(self):
+        panel = self._make_panel()
+        confirmed = self._make_record("id-confirmed", "confirmed", "Fireball")
+        needs_review = self._make_record("id-review", "needs_review", "Sleep")
+        pending = self._make_record("pending-1", "pending_extraction")
+
+        panel.refresh(self._make_session([confirmed, needs_review, pending]))
+
+        panel._confirmed_list.setCurrentRow(0)
+        self.assertEqual(len(panel._confirmed_list.selectedItems()), 1)
+
+        panel._needs_review_list.setCurrentRow(0)
+        self.assertEqual(len(panel._confirmed_list.selectedItems()), 0)
+        self.assertEqual(len(panel._needs_review_list.selectedItems()), 1)
+        self.assertEqual(len(panel._pending_list.selectedItems()), 0)
+
+    def test_display_labels_prefer_draft_then_canonical_or_pending_prefix(self):
+        panel = self._make_panel()
+
+        confirmed_prefers_draft = self._make_record(
+            "id-confirmed", "confirmed", "Canonical Name", section_order=0
+        )
+        confirmed_prefers_draft.draft_spell = _SpellListFixtureSpell(name="Draft Name")
+
+        needs_review_prefers_draft = self._make_record(
+            "id-review", "needs_review", "Needs Review Draft", section_order=0
+        )
+        needs_review_prefers_draft.canonical_spell = _SpellListFixtureSpell(
+            name="Needs Review Canonical"
+        )
+
+        confirmed_fallback_canonical = self._make_record(
+            "id-confirmed-fallback", "confirmed", "Canonical Fallback", section_order=1
+        )
+        confirmed_fallback_canonical.draft_spell = None
+
+        pending = self._make_record("abcdef123456", "pending_extraction")
+
+        panel.refresh(
+            self._make_session(
+                [
+                    confirmed_prefers_draft,
+                    needs_review_prefers_draft,
+                    confirmed_fallback_canonical,
+                    pending,
+                ]
+            )
+        )
+
+        self.assertEqual(panel._confirmed_list.item(0).text(), "Draft Name")
+        self.assertEqual(panel._needs_review_list.item(0).text(), "Needs Review Draft")
+        self.assertEqual(panel._confirmed_list.item(1).text(), "Canonical Fallback")
+        self.assertEqual(panel._pending_list.item(0).text(), "[Pending] abcdef12")
+
+        self.assertNotEqual(panel._confirmed_list.item(0).text(), "Canonical Name")
+        self.assertNotEqual(panel._needs_review_list.item(0).text(), "Needs Review Canonical")
 
 
 class TestReviewPanel(unittest.TestCase):
@@ -296,6 +489,8 @@ class TestReviewPanel(unittest.TestCase):
 
     def test_shows_placeholder_by_default(self):
         panel = self._make_panel()
+        self.assertEqual(panel._stack.count(), 3)
+        self.assertIs(panel._stack.currentWidget(), panel._placeholder_label)
         self.assertTrue(panel._placeholder_label.isVisible())
 
     def test_show_pending_displays_pending_view(self):
@@ -310,10 +505,9 @@ class TestReviewPanel(unittest.TestCase):
         panel = self._make_panel()
         record = self._make_pending_record()
         panel.show_pending_record(record)
-        self.assertIn("Sleep", panel._pending_name_label.text())
-        self.assertIn("5", panel._pending_order_label.text())
-        self.assertIn("100", panel._pending_range_label.text())
-        self.assertIn("120", panel._pending_range_label.text())
+        self.assertEqual(panel._pending_name_label.text(), "Spell: Sleep")
+        self.assertEqual(panel._pending_order_label.text(), "Extraction order: 5")
+        self.assertEqual(panel._pending_range_label.text(), "Boundary lines: 100-120")
 
     def test_show_review_displays_review_editor(self):
         panel = self._make_panel()
@@ -323,6 +517,78 @@ class TestReviewPanel(unittest.TestCase):
             panel.show_review_record(record, session)
         self.assertTrue(panel._review_widget.isVisible())
         self.assertFalse(panel._placeholder_label.isVisible())
+
+    def test_show_review_unrecoverable_record_falls_back_to_placeholder(self):
+        panel = self._make_panel()
+        record = MagicMock()
+        record.spell_id = "broken-1"
+        record.status = MagicMock(value="needs_review")
+        record.draft_dirty = False
+        record.draft_spell = None
+        record.canonical_spell = None
+        session = MagicMock()
+
+        panel.show_review_record(record, session)
+
+        self.assertIs(panel._stack.currentWidget(), panel._placeholder_label)
+        self.assertFalse(panel._loading)
+
+    def test_show_review_seeds_fields_from_get_review_draft(self):
+        panel = self._make_panel()
+        record = self._make_needs_review_record()
+        session = MagicMock()
+
+        draft = MagicMock()
+        draft.name = "Magic Missile"
+        draft.level = 1
+        draft.description = "A dart of force"
+        draft.class_list = "Wizard"
+        draft.school = ["Evocation"]
+        draft.sphere = None
+        draft.range = "60 yds"
+        draft.casting_time = "1"
+        draft.duration = "Special"
+        draft.area_of_effect = "One target"
+        draft.saving_throw = "None"
+        draft.components = ["V", "S"]
+        draft.reversible = False
+        draft.needs_review = True
+        draft.review_notes = "Check source wording"
+
+        with patch("app.ui.review_panel.get_review_draft", return_value=draft):
+            panel.show_review_record(record, session)
+
+        self.assertEqual(panel._field_name.text(), "Magic Missile")
+        self.assertEqual(panel._field_level.text(), "1")
+        self.assertEqual(panel._field_description.toPlainText(), "A dart of force")
+        self.assertEqual(panel._field_class_list.currentText(), "Wizard")
+        self.assertEqual(panel._field_school.text(), "Evocation")
+        self.assertEqual(panel._field_sphere.text(), "")
+        self.assertEqual(panel._field_range.text(), "60 yds")
+        self.assertEqual(panel._field_casting_time.text(), "1")
+        self.assertEqual(panel._field_duration.text(), "Special")
+        self.assertEqual(panel._field_area_of_effect.text(), "One target")
+        self.assertEqual(panel._field_saving_throw.text(), "None")
+        self.assertEqual(panel._field_components.text(), "V, S")
+        self.assertFalse(panel._field_reversible.isChecked())
+        self.assertTrue(panel._field_needs_review.isChecked())
+        self.assertEqual(panel._field_review_notes.toPlainText(), "Check source wording")
+
+    def test_show_review_resets_loading_when_seeding_raises(self):
+        panel = self._make_panel()
+        record = self._make_needs_review_record()
+        session = MagicMock()
+
+        class _ExplodingDraft:
+            @property
+            def name(self):
+                raise RuntimeError("seed failed")
+
+        with patch("app.ui.review_panel.get_review_draft", return_value=_ExplodingDraft()):
+            with self.assertRaisesRegex(RuntimeError, "seed failed"):
+                panel.show_review_record(record, session)
+
+        self.assertFalse(panel._loading)
 
     def test_dirty_indicator_hidden_when_not_dirty(self):
         panel = self._make_panel()
@@ -361,7 +627,111 @@ class TestReviewPanel(unittest.TestCase):
             panel._field_name.setText("New Name")
             panel._on_field_edited()
             mock_apply.assert_called_once()
+            self.assertEqual(mock_apply.call_args.kwargs["draft_updates"]["name"], "New Name")
+            self.assertEqual(mock_apply.call_args.kwargs["draft_updates"]["level"], "3")
+            self.assertIsNone(mock_apply.call_args.kwargs["draft_updates"]["sphere"])
         self.assertTrue(panel._dirty_banner.isVisible())
+        self.assertEqual(panel._dirty_banner.text(), "Unsaved changes")
+
+    def test_wizard_empty_sphere_edit_stays_valid(self):
+        from app.models import ClassList, Component, Spell
+        from app.session import SpellRecord
+
+        panel = self._make_panel()
+        session = MagicMock()
+
+        spell = Spell(
+            name="Sleep",
+            class_list=ClassList.WIZARD,
+            level=1,
+            school=["Enchantment/Charm"],
+            sphere=None,
+            range="30 yds",
+            components=[Component.V, Component.S],
+            duration="5 rounds",
+            casting_time="1",
+            area_of_effect="30-ft cube",
+            saving_throw="Neg.",
+            description="Puts creatures to sleep.",
+            source_document="PHB",
+            extraction_start_line=1,
+            extraction_end_line=2,
+        )
+        record = SpellRecord(
+            spell_id="wiz-empty-sphere",
+            status=SpellRecordStatus.NEEDS_REVIEW,
+            extraction_order=0,
+            section_order=0,
+            boundary_start_line=0,
+            draft_spell=spell,
+        )
+
+        panel.show_review_record(record, session)
+        panel._field_name.setText("Sleep II")
+        panel._field_sphere.setText("")
+        panel._on_field_edited()
+
+        self.assertIsNotNone(record.draft_spell)
+        self.assertIsNone(record.draft_spell.sphere)
+        self.assertTrue(panel._dirty_banner.isVisible())
+        self.assertEqual(panel._dirty_banner.text(), "Unsaved changes")
+
+    def test_priest_sphere_payload_remains_list_based(self):
+        panel = self._make_panel()
+        record = self._make_needs_review_record()
+        session = MagicMock()
+
+        draft = MagicMock()
+        draft.name = "Bless"
+        draft.level = 1
+        draft.description = "Priest support spell"
+        draft.class_list = "Priest"
+        draft.school = ["Abjuration"]
+        draft.sphere = ["Combat"]
+        draft.range = "60 yds"
+        draft.casting_time = "1"
+        draft.duration = "6 rounds"
+        draft.area_of_effect = "50-ft radius"
+        draft.saving_throw = "None"
+        draft.components = ["V", "S"]
+        draft.reversible = False
+        draft.needs_review = True
+        draft.review_notes = None
+
+        with patch("app.ui.review_panel.get_review_draft", return_value=draft):
+            panel.show_review_record(record, session)
+
+        with patch("app.ui.review_panel.apply_review_edits") as mock_apply:
+            panel._field_sphere.setText("Combat, Healing")
+            panel._on_field_edited()
+            self.assertEqual(mock_apply.call_args.kwargs["draft_updates"]["class_list"], "Priest")
+            self.assertEqual(
+                mock_apply.call_args.kwargs["draft_updates"]["sphere"],
+                ["Combat", "Healing"],
+            )
+
+        with patch("app.ui.review_panel.apply_review_edits") as mock_apply:
+            panel._field_sphere.setText("")
+            panel._on_field_edited()
+            self.assertEqual(mock_apply.call_args.kwargs["draft_updates"]["sphere"], [])
+
+    def test_invalid_edit_shows_invalid_banner(self):
+        panel = self._make_panel()
+        record = self._make_needs_review_record()
+        session = MagicMock()
+
+        with patch("app.ui.review_panel.get_review_draft", return_value=record.draft_spell):
+            panel.show_review_record(record, session)
+
+        with patch(
+            "app.ui.review_panel.apply_review_edits",
+            side_effect=ValueError("bad level"),
+        ):
+            panel._field_level.setText("not-an-int")
+            panel._on_field_edited()
+
+        self.assertTrue(panel._dirty_banner.isVisible())
+        self.assertIn("Invalid: bad level", panel._dirty_banner.text())
 
 
 class TestReviewPanelActions(unittest.TestCase):
@@ -388,6 +758,40 @@ class TestReviewPanelActions(unittest.TestCase):
         session = MagicMock()
         with patch("app.ui.review_panel.get_review_draft", return_value=spell):
             panel.show_review_record(record, session)
+        panel._current_record = record
+        panel._current_session = session
+        return panel, record, session
+
+    def _make_panel_with_needs_review_record(self):
+        panel, record, session = self._make_panel_with_confirmed_record()
+        record.status = MagicMock(value="needs_review")
+        spell = record.draft_spell
+        with patch("app.ui.review_panel.get_review_draft", return_value=spell):
+            panel.show_review_record(record, session)
+        return panel, record, session
+
+    def _make_panel_with_draft_only_needs_review_record(self):
+        from app.ui.review_panel import ReviewPanel
+
+        config = MagicMock()
+        panel = ReviewPanel(config=config)
+        record = MagicMock()
+        record.spell_id = "needs-review-1"
+        record.status = MagicMock(value="needs_review")
+        record.draft_dirty = False
+
+        spell = MagicMock()
+        spell.name = "Sleep"
+        spell.level = 1
+        spell.description = "Puts targets to sleep"
+        spell.review_notes = None
+        record.draft_spell = spell
+        record.canonical_spell = None
+
+        session = MagicMock()
+        with patch("app.ui.review_panel.get_review_draft", return_value=spell):
+            panel.show_review_record(record, session)
+
         panel._current_record = record
         panel._current_session = session
         return panel, record, session
@@ -420,6 +824,47 @@ class TestReviewPanelActions(unittest.TestCase):
             mock_save.assert_called_once()
         self.assertEqual(len(emitted), 1)
 
+    def test_save_shows_critical_and_does_not_emit_when_backend_raises(self):
+        panel, record, session = self._make_panel_with_confirmed_record()
+        emitted = []
+        panel.session_changed.connect(lambda s: emitted.append(s))
+
+        with patch(
+            "app.ui.review_panel.get_confirmed_save_duplicate_conflict", return_value=None
+        ), patch(
+            "app.ui.review_panel.save_confirmed_changes",
+            side_effect=RuntimeError("database unavailable"),
+        ) as mock_save, patch("app.ui.review_panel.QMessageBox.critical") as mock_critical:
+            panel._on_save_confirmed()
+            mock_save.assert_called_once()
+            mock_critical.assert_called_once()
+            self.assertNotIn("database unavailable", mock_critical.call_args.args[2])
+
+        self.assertEqual(emitted, [])
+
+    def test_save_blocked_when_form_is_currently_invalid(self):
+        panel, record, session = self._make_panel_with_confirmed_record()
+        emitted = []
+        panel.session_changed.connect(lambda s: emitted.append(s))
+
+        with patch(
+            "app.ui.review_panel.apply_review_edits",
+            side_effect=ValueError("bad level"),
+        ):
+            panel._field_level.setText("not-an-int")
+            panel._on_field_edited()
+
+        with patch("app.ui.review_panel.QMessageBox.warning") as mock_warning, patch(
+            "app.ui.review_panel.get_confirmed_save_duplicate_conflict", return_value=None
+        ) as mock_conflict, patch("app.ui.review_panel.save_confirmed_changes") as mock_save:
+            panel._on_save_confirmed()
+
+        mock_warning.assert_called_once()
+        self.assertIn("validation errors", mock_warning.call_args.args[2].lower())
+        mock_conflict.assert_not_called()
+        mock_save.assert_not_called()
+        self.assertEqual(emitted, [])
+
     def test_discard_calls_discard_and_clears_dirty(self):
         panel, record, session = self._make_panel_with_confirmed_record()
         record.draft_dirty = True
@@ -432,6 +877,82 @@ class TestReviewPanelActions(unittest.TestCase):
             mock_show.assert_called_once_with(panel._current_record, panel._current_session)
         self.assertFalse(panel._dirty_banner.isVisible())
 
+    def test_discard_shows_critical_and_does_not_emit_when_backend_raises(self):
+        panel, record, session = self._make_panel_with_confirmed_record()
+        record.draft_dirty = True
+        panel._dirty_banner.setVisible(True)
+        emitted = []
+        panel.session_changed.connect(lambda s: emitted.append(s))
+
+        with patch(
+            "app.ui.review_panel.discard_record_draft",
+            side_effect=RuntimeError("database unavailable"),
+        ) as mock_discard, patch(
+            "app.ui.review_panel.QMessageBox.critical"
+        ) as mock_critical, patch.object(panel, "show_review_record") as mock_show:
+            panel._on_discard()
+            mock_discard.assert_called_once_with(record)
+            mock_critical.assert_called_once()
+            self.assertNotIn("database unavailable", mock_critical.call_args.args[2])
+            mock_show.assert_not_called()
+
+        self.assertTrue(panel._dirty_banner.isVisible())
+        self.assertEqual(emitted, [])
+
+    def test_discard_enabled_for_needs_review_with_canonical_spell(self):
+        panel, record, session = self._make_panel_with_needs_review_record()
+        self.assertIsNotNone(record.canonical_spell)
+        self.assertTrue(panel._btn_discard.isEnabled())
+        self.assertEqual(panel._btn_discard.toolTip(), "")
+
+    def test_discard_needs_review_without_canonical_shows_warning_and_keeps_draft(self):
+        from app.ui.review_panel import ReviewPanel
+
+        config = MagicMock()
+        panel = ReviewPanel(config=config)
+        record = MagicMock()
+        record.spell_id = "needs-review-1"
+        record.status = MagicMock(value="needs_review")
+        record.draft_dirty = True
+
+        spell = MagicMock()
+        spell.name = "Sleep"
+        spell.level = 1
+        spell.description = "Puts targets to sleep"
+        spell.review_notes = None
+        record.draft_spell = spell
+        record.canonical_spell = None
+
+        session = MagicMock()
+        with patch("app.ui.review_panel.get_review_draft", return_value=spell):
+            panel.show_review_record(record, session)
+
+        self.assertFalse(panel._btn_discard.isEnabled())
+        self.assertIn("draft-only Needs Review", panel._btn_discard.toolTip())
+        self.assertFalse(panel._btn_reextract.isEnabled())
+        self.assertIn("draft-only Needs Review", panel._btn_reextract.toolTip())
+
+        emitted = []
+        panel.session_changed.connect(lambda s: emitted.append(s))
+
+        with patch("app.ui.review_panel.discard_record_draft") as mock_discard, patch(
+            "app.ui.review_panel.QMessageBox.warning"
+        ) as mock_warning:
+            panel._on_discard()
+
+        mock_warning.assert_called_once_with(
+            panel,
+            "Discard Unavailable",
+            "Discard is unavailable for draft-only Needs Review records. "
+            "Use Delete instead.",
+        )
+        mock_discard.assert_not_called()
+        self.assertIs(panel._stack.currentWidget(), panel._review_widget)
+        self.assertEqual(panel._field_name.text(), "Sleep")
+        self.assertTrue(panel._dirty_banner.isVisible())
+        self.assertIs(record.draft_spell, spell)
+        self.assertEqual(emitted, [])
+
     def test_delete_calls_delete_and_emits_session_changed_on_confirm(self):
         panel, record, session = self._make_panel_with_confirmed_record()
         emitted = []
@@ -442,7 +963,49 @@ class TestReviewPanelActions(unittest.TestCase):
         ), patch("app.ui.review_panel.delete_record", return_value=True) as mock_del:
             panel._on_delete()
             mock_del.assert_called_once_with(session, spell_id="abc-123")
-        self.assertGreater(len(emitted), 0)
+        self.assertEqual(emitted, [session])
+        self.assertIsNone(panel._current_record)
+        self.assertIs(panel._stack.currentWidget(), panel._placeholder_label)
+
+    def test_delete_shows_error_and_keeps_current_record_when_delete_fails(self):
+        panel, record, session = self._make_panel_with_confirmed_record()
+        emitted = []
+        panel.session_changed.connect(lambda s: emitted.append(s))
+
+        with patch(
+            "app.ui.review_panel.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ), patch(
+            "app.ui.review_panel.delete_record", return_value=False
+        ) as mock_del, patch("app.ui.review_panel.QMessageBox.warning") as mock_warning:
+            panel._on_delete()
+            mock_del.assert_called_once_with(session, spell_id="abc-123")
+            mock_warning.assert_called_once()
+
+        self.assertIs(panel._current_record, record)
+        self.assertIs(panel._stack.currentWidget(), panel._review_widget)
+        self.assertEqual(emitted, [])
+
+    def test_delete_shows_critical_and_keeps_current_record_when_backend_raises(self):
+        panel, record, session = self._make_panel_with_confirmed_record()
+        emitted = []
+        panel.session_changed.connect(lambda s: emitted.append(s))
+
+        with patch(
+            "app.ui.review_panel.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ), patch(
+            "app.ui.review_panel.delete_record",
+            side_effect=RuntimeError("database unavailable"),
+        ) as mock_del, patch("app.ui.review_panel.QMessageBox.critical") as mock_critical:
+            panel._on_delete()
+            mock_del.assert_called_once_with(session, spell_id="abc-123")
+            mock_critical.assert_called_once()
+            self.assertNotIn("database unavailable", mock_critical.call_args.args[2])
+
+        self.assertIs(panel._current_record, record)
+        self.assertIs(panel._stack.currentWidget(), panel._review_widget)
+        self.assertEqual(emitted, [])
 
     def test_delete_aborted_when_user_cancels(self):
         panel, record, session = self._make_panel_with_confirmed_record()
@@ -455,24 +1018,59 @@ class TestReviewPanelActions(unittest.TestCase):
 
     def test_reextract_no_op_on_empty_focus_prompt_cancel(self):
         panel, record, session = self._make_panel_with_confirmed_record()
+        emitted = []
+        panel.session_changed.connect(lambda s: emitted.append(s))
         with patch("app.ui.review_panel.QInputDialog.getText", return_value=("", False)), patch(
             "app.ui.review_panel.reextract_record_into_draft"
         ) as mock_re:
             panel._on_reextract()
             mock_re.assert_not_called()
+        self.assertEqual(emitted, [])
+
+    def test_reextract_draft_only_needs_review_shows_unavailable_warning(self):
+        panel, record, session = self._make_panel_with_draft_only_needs_review_record()
+        emitted = []
+        panel.session_changed.connect(lambda s: emitted.append(s))
+
+        with patch("app.ui.review_panel.QMessageBox.warning") as mock_warning, patch(
+            "app.ui.review_panel.QMessageBox.question"
+        ) as mock_question, patch(
+            "app.ui.review_panel.QInputDialog.getText"
+        ) as mock_get_text, patch("app.ui.review_panel.reextract_record_into_draft") as mock_re:
+            panel._on_reextract()
+            mock_warning.assert_called_once_with(
+                panel,
+                "Re-extract Unavailable",
+                "Re-extract is unavailable for draft-only Needs Review records. "
+                "Delete this record and run extraction again.",
+            )
+            mock_question.assert_not_called()
+            mock_get_text.assert_not_called()
+            mock_re.assert_not_called()
+
+        self.assertEqual(panel._field_name.text(), "Sleep")
+        self.assertEqual(emitted, [])
 
     def test_reextract_calls_api_when_user_provides_prompt(self):
         panel, record, session = self._make_panel_with_confirmed_record()
+        emitted = []
+        panel.session_changed.connect(lambda s: emitted.append(s))
         updated_spell = MagicMock()
         updated_spell.name = "Fireball v2"
         updated_spell.level = 3
         updated_spell.description = "Even bigger"
         updated_spell.review_notes = None
+
+        def _reextract_side_effect(*args, **kwargs):
+            record.draft_spell = updated_spell
+            record.draft_dirty = True
+            return updated_spell
+
         with patch(
             "app.ui.review_panel.QInputDialog.getText", return_value=("focus on damage", True)
         ), patch(
-            "app.ui.review_panel.reextract_record_into_draft", return_value=updated_spell
-        ) as mock_re, patch("app.ui.review_panel.get_review_draft", return_value=updated_spell):
+            "app.ui.review_panel.reextract_record_into_draft", side_effect=_reextract_side_effect
+        ) as mock_re:
             panel._on_reextract()
             mock_re.assert_called_once_with(
                 session,
@@ -481,6 +1079,78 @@ class TestReviewPanelActions(unittest.TestCase):
                 config=panel._config,
             )
             self.assertEqual(panel._field_name.text(), updated_spell.name)
+            self.assertIs(record.draft_spell, updated_spell)
+            self.assertEqual(emitted, [session])
+
+    def test_reextract_shows_error_and_keeps_ui_consistent_when_api_raises(self):
+        panel, record, session = self._make_panel_with_confirmed_record()
+        emitted = []
+        panel.session_changed.connect(lambda s: emitted.append(s))
+
+        panel._field_name.setText("Stale UI Value")
+
+        with patch(
+            "app.ui.review_panel.QInputDialog.getText", return_value=("focus on damage", True)
+        ), patch(
+            "app.ui.review_panel.reextract_record_into_draft",
+            side_effect=RuntimeError("service unavailable"),
+        ) as mock_reextract, patch(
+            "app.ui.review_panel.QMessageBox.critical"
+        ) as mock_critical:
+            panel._on_reextract()
+
+            mock_reextract.assert_called_once_with(
+                session,
+                spell_id="abc-123",
+                focus_prompt="focus on damage",
+                config=panel._config,
+            )
+            mock_critical.assert_called_once()
+            self.assertNotIn("service unavailable", mock_critical.call_args.args[2])
+
+        self.assertEqual(panel._field_name.text(), "Fireball")
+        self.assertIs(panel._stack.currentWidget(), panel._review_widget)
+
+        self.assertFalse(panel._dirty_banner.isVisible())
+        self.assertEqual(emitted, [])
+
+    def test_reextract_success_resets_invalid_banner_text(self):
+        panel, record, session = self._make_panel_with_confirmed_record()
+        emitted = []
+        panel.session_changed.connect(lambda s: emitted.append(s))
+
+        with patch(
+            "app.ui.review_panel.apply_review_edits",
+            side_effect=ValueError("bad level"),
+        ):
+            panel._field_level.setText("not-an-int")
+            panel._on_field_edited()
+
+        self.assertTrue(panel._dirty_banner.isVisible())
+        self.assertEqual(panel._dirty_banner.text(), "Invalid: bad level")
+
+        updated_spell = MagicMock()
+        updated_spell.name = "Fireball v2"
+        updated_spell.level = 3
+        updated_spell.description = "Even bigger"
+        updated_spell.review_notes = None
+
+        def _reextract_side_effect(*args, **kwargs):
+            record.draft_spell = updated_spell
+            record.draft_dirty = True
+            return updated_spell
+
+        with patch(
+            "app.ui.review_panel.QInputDialog.getText", return_value=("focus on damage", True)
+        ), patch(
+            "app.ui.review_panel.reextract_record_into_draft", side_effect=_reextract_side_effect
+        ):
+            panel._on_reextract()
+
+        self.assertTrue(panel._dirty_banner.isVisible())
+        self.assertEqual(panel._dirty_banner.text(), "Unsaved changes")
+        self.assertEqual(panel._field_name.text(), updated_spell.name)
+        self.assertEqual(emitted, [session])
 
     def test_accept_non_conflicting_record_commits_and_emits_session_changed(self):
         from app.ui.review_panel import DuplicateResolutionStrategy, ReviewPanel
@@ -512,6 +1182,45 @@ class TestReviewPanelActions(unittest.TestCase):
                 config=config,
             )
         self.assertEqual(len(emitted), 1)
+
+    def test_accept_blocked_when_form_is_currently_invalid(self):
+        panel, _, session = self._make_panel_with_needs_review_record()
+        emitted = []
+        panel.session_changed.connect(lambda s: emitted.append(s))
+
+        with patch(
+            "app.ui.review_panel.apply_review_edits",
+            side_effect=ValueError("bad level"),
+        ):
+            panel._field_level.setText("not-an-int")
+            panel._on_field_edited()
+
+        with patch("app.ui.review_panel.QMessageBox.warning") as mock_warning, patch(
+            "app.ui.review_panel.accept_review_record"
+        ) as mock_accept:
+            panel._on_accept()
+
+        mock_warning.assert_called_once()
+        self.assertIn("validation errors", mock_warning.call_args.args[2].lower())
+        mock_accept.assert_not_called()
+        self.assertEqual(emitted, [])
+
+    def test_accept_shows_critical_and_does_not_emit_when_backend_raises(self):
+        panel, record, session = self._make_panel_with_confirmed_record()
+        record.status = MagicMock(value="needs_review")
+        emitted = []
+        panel.session_changed.connect(lambda s: emitted.append(s))
+
+        with patch(
+            "app.ui.review_panel.accept_review_record",
+            side_effect=RuntimeError("service unavailable"),
+        ) as mock_accept, patch("app.ui.review_panel.QMessageBox.critical") as mock_critical:
+            panel._on_accept()
+            mock_accept.assert_called_once()
+            mock_critical.assert_called_once()
+            self.assertNotIn("service unavailable", mock_critical.call_args.args[2])
+
+        self.assertEqual(emitted, [])
 
     def test_accept_refreshes_buttons_after_status_changes_to_confirmed(self):
         from app.ui.review_panel import ReviewPanel
@@ -545,65 +1254,88 @@ class TestReviewPanelActions(unittest.TestCase):
         self.assertFalse(panel._btn_accept.isVisible())
 
     def test_accept_conflict_skip_leaves_record_uncommitted(self):
-        panel, record, session = self._make_panel_with_confirmed_record()
-        record.status = MagicMock(value="needs_review")
-        spell = record.draft_spell
-        with patch("app.ui.review_panel.get_review_draft", return_value=spell):
-            panel.show_review_record(record, session)
+        panel, _, session = self._make_panel_with_needs_review_record()
         emitted = []
         panel.session_changed.connect(lambda s: emitted.append(s))
-        with patch("app.ui.review_panel.accept_review_record", return_value=False), patch(
-            "app.ui.review_panel.QDialog"
-        ) as mock_dlg_cls, patch("app.ui.review_panel.QVBoxLayout"), patch(
-            "app.ui.review_panel.QRadioButton"
-        ), patch("app.ui.review_panel.QDialogButtonBox"):
-            mock_dlg_cls.return_value = MagicMock()
-            mock_dlg_cls.return_value.exec.return_value = QDialog.DialogCode.Rejected
+
+        checked_states = iter([False, False])
+
+        def _is_checked(*_args, **_kwargs) -> bool:
+            return next(checked_states, False)
+
+        with patch("app.ui.review_panel.accept_review_record", return_value=False) as mock_accept, patch(
+            "app.ui.review_panel.QDialog.exec",
+            return_value=QDialog.DialogCode.Accepted,
+        ), patch(
+            "app.ui.review_panel.QRadioButton.isChecked",
+            side_effect=_is_checked,
+        ):
             panel._on_accept()
+        self.assertEqual(mock_accept.call_count, 1)
         self.assertEqual(emitted, [])
 
     def test_accept_conflict_dialog_accepted_overwrite_calls_overwrite_strategy(self):
         from app.ui.review_panel import DuplicateResolutionStrategy
 
+        panel, _, session = self._make_panel_with_needs_review_record()
+        emitted = []
+        panel.session_changed.connect(lambda s: emitted.append(s))
         with patch("app.ui.review_panel.accept_review_record") as mock_accept, patch(
-            "app.ui.review_panel.QDialog"
-        ) as mock_dlg_cls, patch("app.ui.review_panel.QVBoxLayout"), patch(
-            "app.ui.review_panel.QRadioButton"
-        ), patch("app.ui.review_panel.QDialogButtonBox"):
-            mock_dlg_cls.DialogCode = QDialog.DialogCode
-            mock_dlg_cls.return_value = MagicMock()
-            mock_dlg_cls.return_value.exec.return_value = QDialog.DialogCode.Accepted
+            "app.ui.review_panel.QDialog.exec",
+            autospec=True,
+            return_value=QDialog.DialogCode.Accepted,
+        ):
             mock_accept.side_effect = [False, True]
-            panel, record, session = self._make_panel_with_confirmed_record()
-            record.status = MagicMock(value="needs_review")
             panel._on_accept()
         self.assertEqual(mock_accept.call_count, 2)
         self.assertEqual(
             mock_accept.call_args_list[1].kwargs["duplicate_resolution"],
             DuplicateResolutionStrategy.OVERWRITE,
         )
+        self.assertEqual(emitted, [session])
+
+    def test_accept_conflict_dialog_accepted_keep_both_calls_keep_both_strategy(self):
+        from app.ui.review_panel import DuplicateResolutionStrategy
+
+        panel, _, session = self._make_panel_with_needs_review_record()
+        emitted = []
+        panel.session_changed.connect(lambda s: emitted.append(s))
+
+        checked_states = iter([False, True])
+
+        def _is_checked(*_args, **_kwargs) -> bool:
+            return next(checked_states, False)
+
+        with patch("app.ui.review_panel.accept_review_record") as mock_accept, patch(
+            "app.ui.review_panel.QDialog.exec",
+            return_value=QDialog.DialogCode.Accepted,
+        ), patch(
+            "app.ui.review_panel.QRadioButton.isChecked",
+            side_effect=_is_checked,
+        ):
+            mock_accept.side_effect = [False, True]
+            panel._on_accept()
+
+        self.assertEqual(mock_accept.call_count, 2)
+        self.assertEqual(
+            mock_accept.call_args_list[1].kwargs["duplicate_resolution"],
+            DuplicateResolutionStrategy.KEEP_BOTH,
+        )
+        self.assertEqual(emitted, [session])
 
     def test_accept_conflict_dialog_rejected_leaves_record_uncommitted(self):
+        panel, _, _ = self._make_panel_with_needs_review_record()
         with patch("app.ui.review_panel.accept_review_record") as mock_accept, patch(
-            "app.ui.review_panel.QDialog"
-        ) as mock_dlg_cls, patch("app.ui.review_panel.QVBoxLayout"), patch(
-            "app.ui.review_panel.QRadioButton"
-        ), patch("app.ui.review_panel.QDialogButtonBox"):
-            mock_dlg_cls.DialogCode = QDialog.DialogCode
-            mock_dlg_cls.return_value = MagicMock()
-            mock_dlg_cls.return_value.exec.return_value = QDialog.DialogCode.Rejected
+            "app.ui.review_panel.QDialog.exec",
+            autospec=True,
+            return_value=QDialog.DialogCode.Rejected,
+        ):
             mock_accept.return_value = False
-            panel, record, session = self._make_panel_with_confirmed_record()
-            record.status = MagicMock(value="needs_review")
             panel._on_accept()
         self.assertEqual(mock_accept.call_count, 1)
 
     def test_accept_conflict_dialog_accepted_calls_accept_review_record_second_time(self):
-        panel, record, session = self._make_panel_with_confirmed_record()
-        record.status = MagicMock(value="needs_review")
-        spell = record.draft_spell
-        with patch("app.ui.review_panel.get_review_draft", return_value=spell):
-            panel.show_review_record(record, session)
+        panel, _, session = self._make_panel_with_needs_review_record()
         call_count = [0]
 
         def mock_accept(*args, **kwargs):
@@ -613,13 +1345,10 @@ class TestReviewPanelActions(unittest.TestCase):
         emitted = []
         panel.session_changed.connect(lambda s: emitted.append(s))
         with patch("app.ui.review_panel.accept_review_record", side_effect=mock_accept), patch(
-            "app.ui.review_panel.QDialog"
-        ) as mock_dlg_cls, patch("app.ui.review_panel.QVBoxLayout"), patch(
-            "app.ui.review_panel.QRadioButton"
-        ), patch("app.ui.review_panel.QDialogButtonBox"):
-            mock_dlg_cls.DialogCode = QDialog.DialogCode
-            mock_dlg_cls.return_value = MagicMock()
-            mock_dlg_cls.return_value.exec.return_value = QDialog.DialogCode.Accepted
+            "app.ui.review_panel.QDialog.exec",
+            autospec=True,
+            return_value=QDialog.DialogCode.Accepted,
+        ):
             panel._on_accept()
         self.assertEqual(call_count[0], 2)
         self.assertGreater(len(emitted), 0)
@@ -926,6 +1655,7 @@ class TestMainWindowWorkers(unittest.TestCase):
         session = MagicMock()
         session.last_open_path = "/tmp/test.pdf"
         session.records = []
+        session.selected_spell_id = None
         win._set_session(session, source_path="/tmp/test.pdf")
         win._routed_document = MagicMock()
         return win
@@ -960,7 +1690,7 @@ class TestMainWindowWorkers(unittest.TestCase):
         win._spell_list_panel = mock_panel
         win._on_spells_detected(7)
         self.assertIn("7", win._status_bar.currentMessage())
-        mock_panel.refresh.assert_called_once_with(win._session)
+        mock_panel.refresh.assert_called_once_with(win._session, selected_spell_id=None)
 
     def test_extraction_actions_disabled_while_worker_active(self):
         win = self._make_window_with_session()
@@ -1002,8 +1732,9 @@ class TestMainWindowWorkers(unittest.TestCase):
         updated_session = MagicMock()
         updated_session.records = []
         updated_session.last_open_path = "/tmp/test.pdf"
+        updated_session.selected_spell_id = None
         win._on_extraction_complete(updated_session)
-        mock_panel.refresh.assert_called_once_with(updated_session)
+        mock_panel.refresh.assert_called_once_with(updated_session, selected_spell_id=None)
 
     def test_settings_action_disabled_when_worker_running(self):
         win = self._make_window_with_session()
@@ -1231,6 +1962,41 @@ class TestMainWindowPanelWiring(unittest.TestCase):
         config.force_ocr_by_sha256 = {}
         return SpellScribeMainWindow(config=config)
 
+    def _make_confirmed_record(self, spell_id: str, *, name: str = "Fireball"):
+        record = MagicMock()
+        record.spell_id = spell_id
+        record.status = MagicMock(value="confirmed")
+        record.boundary_start_line = 0
+        record.boundary_end_line = -1
+        record.section_order = 0
+        spell = MagicMock()
+        spell.name = name
+        spell.level = 3
+        spell.description = "Test description"
+        spell.class_list = "Wizard"
+        spell.school = []
+        spell.sphere = []
+        spell.components = []
+        spell.range = ""
+        spell.casting_time = ""
+        spell.duration = ""
+        spell.area_of_effect = ""
+        spell.saving_throw = ""
+        spell.reversible = False
+        spell.needs_review = False
+        spell.review_notes = None
+        record.draft_spell = spell
+        record.canonical_spell = spell
+        return record
+
+    def _make_session_for_records(self, records, *, selected_spell_id=None):
+        session = MagicMock()
+        session.records = list(records)
+        session.selected_spell_id = selected_spell_id
+        session.coordinate_map = MagicMock()
+        session.coordinate_map.regions_for_range.return_value = []
+        return session
+
     def test_panels_created_after_construction(self):
         from app.ui.document_panel import DocumentPanel
         from app.ui.review_panel import ReviewPanel
@@ -1305,9 +2071,34 @@ class TestMainWindowPanelWiring(unittest.TestCase):
     def test_set_session_calls_spell_list_refresh(self):
         win = self._make_window_with_panels()
         new_session = MagicMock()
+        new_session.records = []
+        new_session.selected_spell_id = None
         win._spell_list_panel = MagicMock()
         win._set_session(new_session, source_path="test.pdf")
-        win._spell_list_panel.refresh.assert_called_once_with(new_session)
+        win._spell_list_panel.refresh.assert_called_once_with(
+            new_session,
+            selected_spell_id=None,
+        )
+
+    def test_set_session_restores_selected_spell_id_into_spell_list(self):
+        win = self._make_window_with_panels()
+        selected_spell_id = "spell-restore"
+        record = self._make_confirmed_record(selected_spell_id)
+        session = self._make_session_for_records(
+            [record],
+            selected_spell_id=selected_spell_id,
+        )
+
+        with patch.object(win._review_panel, "show_review_record") as mock_review:
+            win._set_session(session, source_path="test.pdf")
+
+        selected_items = win._spell_list_panel._confirmed_list.selectedItems()
+        self.assertEqual(len(selected_items), 1)
+        self.assertEqual(
+            selected_items[0].data(Qt.ItemDataRole.UserRole),
+            selected_spell_id,
+        )
+        mock_review.assert_called_once_with(record, session)
 
     def test_spell_selection_updates_session_selected_id(self):
         win = self._make_window_with_panels()
@@ -1326,6 +2117,99 @@ class TestMainWindowPanelWiring(unittest.TestCase):
         with patch.object(win._review_panel, "show_pending_record"):
             win._on_spell_selected("spell-42")
         self.assertEqual(session.selected_spell_id, "spell-42")
+
+    def test_clearing_spell_selection_resets_upstream_state(self):
+        win = self._make_window_with_panels()
+        session = MagicMock()
+        session.records = []
+        session.selected_spell_id = "spell-42"
+        win._session = session
+
+        with patch.object(win._review_panel, "show_placeholder") as mock_review_placeholder, patch.object(
+            win._doc_panel, "show_placeholder"
+        ) as mock_doc_placeholder:
+            win._on_spell_selected("")
+
+        self.assertIsNone(session.selected_spell_id)
+        mock_review_placeholder.assert_called_once()
+        mock_doc_placeholder.assert_called_once()
+
+    def test_review_session_refresh_preserves_selection_without_placeholder_reset(self):
+        win = self._make_window_with_panels()
+        selected_spell_id = "spell-keep"
+
+        record = self._make_confirmed_record(selected_spell_id)
+        session = self._make_session_for_records([record], selected_spell_id=selected_spell_id)
+        win._session = session
+        win._spell_list_panel.refresh(session)
+        win._spell_list_panel._confirmed_list.setCurrentRow(0)
+
+        self.assertEqual(session.selected_spell_id, selected_spell_id)
+
+        updated_record = self._make_confirmed_record(selected_spell_id, name="Fireball Updated")
+        updated_session = self._make_session_for_records(
+            [updated_record],
+            selected_spell_id=selected_spell_id,
+        )
+
+        with patch.object(win._review_panel, "show_placeholder") as mock_review_placeholder, patch.object(
+            win._doc_panel, "show_placeholder"
+        ) as mock_doc_placeholder:
+            win._on_review_session_changed(updated_session)
+
+        selected_items = win._spell_list_panel._confirmed_list.selectedItems()
+        self.assertEqual(len(selected_items), 1)
+        self.assertEqual(
+            selected_items[0].data(Qt.ItemDataRole.UserRole),
+            selected_spell_id,
+        )
+        mock_review_placeholder.assert_not_called()
+        mock_doc_placeholder.assert_called_once()
+
+    def test_review_session_refresh_restores_selection_from_updated_session_state(self):
+        win = self._make_window_with_panels()
+        selected_spell_id = "spell-restored-on-refresh"
+        updated_record = self._make_confirmed_record(selected_spell_id)
+        updated_session = self._make_session_for_records(
+            [updated_record],
+            selected_spell_id=selected_spell_id,
+        )
+
+        with patch.object(win._review_panel, "show_review_record") as mock_review:
+            win._on_review_session_changed(updated_session)
+
+        selected_items = win._spell_list_panel._confirmed_list.selectedItems()
+        self.assertEqual(len(selected_items), 1)
+        self.assertEqual(
+            selected_items[0].data(Qt.ItemDataRole.UserRole),
+            selected_spell_id,
+        )
+        mock_review.assert_called_once_with(updated_record, updated_session)
+
+    def test_review_session_refresh_removal_emits_deselection_through_panel_signal(self):
+        win = self._make_window_with_panels()
+        selected_spell_id = "spell-drop"
+
+        record = self._make_confirmed_record(selected_spell_id)
+        session = self._make_session_for_records([record])
+        win._session = session
+        win._spell_list_panel.refresh(session)
+        win._spell_list_panel._confirmed_list.setCurrentRow(0)
+
+        self.assertEqual(session.selected_spell_id, selected_spell_id)
+
+        updated_session = self._make_session_for_records([])
+
+        with patch.object(win._review_panel, "show_placeholder") as mock_review_placeholder, patch.object(
+            win._doc_panel, "show_placeholder"
+        ) as mock_doc_placeholder:
+            win._on_review_session_changed(updated_session)
+
+        self.assertIs(win._session, updated_session)
+        self.assertIsNone(updated_session.selected_spell_id)
+        self.assertEqual(len(win._spell_list_panel._confirmed_list.selectedItems()), 0)
+        mock_review_placeholder.assert_called_once()
+        mock_doc_placeholder.assert_called_once()
 
     def test_spell_selection_dispatches_pdf_to_doc_panel(self):
         win = self._make_window_with_panels()
