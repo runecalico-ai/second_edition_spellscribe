@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -43,6 +44,7 @@ class SpellScribeMainWindow(QMainWindow):
         self._active_worker: object | None = None
         self._active_thread: QThread | None = None
         self._cancel_event: threading.Event = threading.Event()
+        self._extract_scope_spell_ids: set[str] = set()
         self._routed_document = None
 
         self.setWindowTitle("SpellScribe")
@@ -220,6 +222,38 @@ class SpellScribeMainWindow(QMainWindow):
             return
         self._open_document(path)
 
+    def _persist_config_if_needed(self, *, changed: bool) -> None:
+        if not changed:
+            return
+        try:
+            self._config.save()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(
+                self,
+                "Config Save Failed",
+                "Opened document, but config changes could not be saved. "
+                f"{exc}",
+            )
+
+    def _refresh_routed_document_source_path(self, path: str) -> None:
+        if self._routed_document is None:
+            return
+
+        source_path = Path(path)
+        try:
+            self._routed_document = replace(
+                self._routed_document,
+                source_path=source_path,
+            )
+            return
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            setattr(self._routed_document, "source_path", source_path)
+        except (AttributeError, TypeError):
+            return
+
     def _open_document(self, path: str) -> None:
         try:
             sha256 = compute_sha256_hex(path)
@@ -228,18 +262,16 @@ class SpellScribeMainWindow(QMainWindow):
             return
 
         if self._session is not None and self._session.source_sha256_hex == sha256:
-            try:
-                routed = route_document(path, config=self._config)
-            except Exception as exc:  # noqa: BLE001
-                QMessageBox.critical(self, "Open Failed", str(exc))
-                return
-
-            self._routed_document = routed
             self._session.last_open_path = path
-            self._session.coordinate_map = routed.coordinate_map
+            self._refresh_routed_document_source_path(path)
             filename = Path(path).name
             self.setWindowTitle(f"{filename} - SpellScribe")
-            self._config.last_import_directory = str(Path(path).parent)
+            config_changed = False
+            import_dir = str(Path(path).parent)
+            if self._config.last_import_directory != import_dir:
+                self._config.last_import_directory = import_dir
+                config_changed = True
+            self._persist_config_if_needed(changed=config_changed)
             self._status_bar.showMessage(f"Reopened: {filename}")
             return
 
@@ -270,36 +302,89 @@ class SpellScribeMainWindow(QMainWindow):
                 if clicked is not discard_btn:
                     return
 
-        session = restore_session_state_for_source(sha256)
-
-        if session is None:
-            if sha256 not in getattr(self._config, "document_names_by_sha256", {}):
-                dlg = DocumentIdentityDialog(
-                    sha256_hex=sha256,
-                    default_document_name=getattr(
-                        self._config,
-                        "default_source_document",
-                        "",
-                    ),
-                    parent=self,
-                )
-                if dlg.exec() != QDialog.DialogCode.Accepted:
-                    return
-
-                identity_result = dlg.get_result()
-                self._config.document_names_by_sha256[sha256] = identity_result.source_display_name
-                if identity_result.page_offset:
-                    self._config.document_offsets[sha256] = identity_result.page_offset
-                if identity_result.force_ocr:
-                    self._config.force_ocr_by_sha256[sha256] = True
-
-            try:
-                routed = route_document(path, config=self._config)
-            except Exception as exc:  # noqa: BLE001
-                QMessageBox.critical(self, "Open Failed", str(exc))
+        identity_result = None
+        rollback_staged_identity = None
+        staged_identity_changed = False
+        if sha256 not in getattr(self._config, "document_names_by_sha256", {}):
+            dlg = DocumentIdentityDialog(
+                sha256_hex=sha256,
+                default_document_name=getattr(
+                    self._config,
+                    "default_source_document",
+                    "",
+                ),
+                parent=self,
+            )
+            if dlg.exec() != QDialog.DialogCode.Accepted:
                 return
 
-            self._routed_document = routed
+            identity_result = dlg.get_result()
+
+            normalized_display_name = identity_result.source_display_name.strip()
+            if not normalized_display_name:
+                normalized_display_name = getattr(self._config, "default_source_document", "")
+
+            names_by_sha = self._config.document_names_by_sha256
+            offsets_by_sha = self._config.document_offsets
+            force_ocr_by_sha = self._config.force_ocr_by_sha256
+
+            prior_name_exists = sha256 in names_by_sha
+            prior_name = names_by_sha.get(sha256)
+            prior_offset_exists = sha256 in offsets_by_sha
+            prior_offset = offsets_by_sha.get(sha256)
+            prior_force_ocr_exists = sha256 in force_ocr_by_sha
+            prior_force_ocr = force_ocr_by_sha.get(sha256)
+
+            names_by_sha[sha256] = normalized_display_name
+            if not prior_name_exists or prior_name != normalized_display_name:
+                staged_identity_changed = True
+
+            if identity_result.page_offset != 0:
+                offsets_by_sha[sha256] = identity_result.page_offset
+                if not prior_offset_exists or prior_offset != identity_result.page_offset:
+                    staged_identity_changed = True
+            elif prior_offset_exists:
+                offsets_by_sha.pop(sha256, None)
+                staged_identity_changed = True
+
+            if identity_result.force_ocr:
+                force_ocr_by_sha[sha256] = True
+                if not prior_force_ocr_exists or prior_force_ocr is not True:
+                    staged_identity_changed = True
+            elif prior_force_ocr_exists:
+                force_ocr_by_sha.pop(sha256, None)
+                staged_identity_changed = True
+
+            def _rollback_staged_identity() -> None:
+                if prior_name_exists:
+                    names_by_sha[sha256] = prior_name
+                else:
+                    names_by_sha.pop(sha256, None)
+
+                if prior_offset_exists:
+                    offsets_by_sha[sha256] = prior_offset
+                else:
+                    offsets_by_sha.pop(sha256, None)
+
+                if prior_force_ocr_exists:
+                    force_ocr_by_sha[sha256] = prior_force_ocr
+                else:
+                    force_ocr_by_sha.pop(sha256, None)
+
+            rollback_staged_identity = _rollback_staged_identity
+
+        session = restore_session_state_for_source(sha256)
+
+        try:
+            routed = route_document(path, config=self._config)
+        except Exception as exc:  # noqa: BLE001
+            if rollback_staged_identity is not None:
+                rollback_staged_identity()
+            QMessageBox.critical(self, "Open Failed", str(exc))
+            return
+
+        self._routed_document = routed
+        if session is None:
             session = SessionState(
                 source_sha256_hex=sha256,
                 last_open_path=path,
@@ -307,16 +392,17 @@ class SpellScribeMainWindow(QMainWindow):
                 records=[],
             )
         else:
-            try:
-                routed = route_document(path, config=self._config)
-            except Exception as exc:  # noqa: BLE001
-                QMessageBox.critical(self, "Open Failed", str(exc))
-                return
-            self._routed_document = routed
             session.last_open_path = path
             session.coordinate_map = routed.coordinate_map
 
-        self._config.last_import_directory = str(Path(path).parent)
+        config_changed = staged_identity_changed
+
+        import_dir = str(Path(path).parent)
+        if self._config.last_import_directory != import_dir:
+            self._config.last_import_directory = import_dir
+            config_changed = True
+
+        self._persist_config_if_needed(changed=config_changed)
         self._set_session(session, source_path=path)
         self._status_bar.showMessage(f"Opened: {Path(path).name}")
 
@@ -336,6 +422,7 @@ class SpellScribeMainWindow(QMainWindow):
 
         worker.session_ready.connect(self._on_session_ready)
         worker.spells_detected.connect(self._on_spells_detected)
+        worker.progress_updated.connect(self._on_worker_progress)
         worker.failed.connect(self._on_worker_failed)
         worker.cancelled.connect(self._on_worker_cancelled)
         worker.spells_detected.connect(thread.quit)
@@ -357,9 +444,28 @@ class SpellScribeMainWindow(QMainWindow):
     def _on_extract_all(self) -> None:
         self._start_extract_worker(mode="all")
 
+    def _compute_extract_scope_spell_ids(self, mode: str) -> set[str]:
+        if self._session is None:
+            return set()
+
+        pending_spell_ids = {
+            record.spell_id
+            for record in self._session.records
+            if record.status.value == "pending_extraction"
+        }
+        if mode == "selected":
+            selected_spell_id = getattr(self._session, "selected_spell_id", None)
+            if isinstance(selected_spell_id, str) and selected_spell_id in pending_spell_ids:
+                return {selected_spell_id}
+            return set()
+
+        return pending_spell_ids
+
     def _start_extract_worker(self, mode: str) -> None:
         if self._session is None:
             return
+
+        self._extract_scope_spell_ids = self._compute_extract_scope_spell_ids(mode)
 
         self._cancel_event = threading.Event()
         worker = ExtractWorker(
@@ -373,11 +479,27 @@ class SpellScribeMainWindow(QMainWindow):
 
         worker.record_extracted.connect(self._on_record_extracted)
         worker.extraction_complete.connect(self._on_extraction_complete)
-        worker.failed.connect(self._on_worker_failed)
-        worker.cancelled.connect(self._on_worker_cancelled)
+        worker.progress_updated.connect(self._on_worker_progress)
+        extraction_failed_signal = getattr(worker, "extraction_failed", None)
+        if extraction_failed_signal is None:
+            extraction_failed_signal = getattr(worker, "failed", None)
+        if extraction_failed_signal is None:
+            raise AttributeError(
+                "ExtractWorker must expose extraction_failed or failed signal"
+            )
+
+        extraction_cancelled_signal = getattr(worker, "extraction_cancelled", None)
+        if extraction_cancelled_signal is None:
+            extraction_cancelled_signal = getattr(worker, "cancelled", None)
+        if extraction_cancelled_signal is None:
+            raise AttributeError(
+                "ExtractWorker must expose extraction_cancelled or cancelled signal"
+            )
+        extraction_failed_signal.connect(self._on_worker_failed)
+        extraction_cancelled_signal.connect(self._on_worker_cancelled)
         worker.extraction_complete.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        worker.cancelled.connect(thread.quit)
+        extraction_failed_signal.connect(thread.quit)
+        extraction_cancelled_signal.connect(thread.quit)
         thread.started.connect(worker.run)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
@@ -390,6 +512,21 @@ class SpellScribeMainWindow(QMainWindow):
 
     def _on_cancel(self) -> None:
         self._cancel_event.set()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        active_thread = self._active_thread
+        thread_running = active_thread is not None and active_thread.isRunning()
+
+        if self._worker_running or thread_running:
+            self._cancel_event.set()
+
+        if thread_running:
+            active_thread.quit()
+            stopped_within_timeout = active_thread.wait(2000)
+            if not stopped_within_timeout:
+                event.ignore()
+                return
+        super().closeEvent(event)
 
     def _on_spells_detected(self, count: int) -> None:
         self._active_worker = None
@@ -406,6 +543,21 @@ class SpellScribeMainWindow(QMainWindow):
         self._status_bar.showMessage(f"Extracted: {spell_id}")
         self._update_action_states()
 
+    def _on_worker_progress(self, current: int, total: int) -> None:
+        current_safe = max(0, current)
+        total_safe = max(0, total)
+        if total_safe == 0:
+            self._status_bar.showMessage(
+                f"Progress: {current_safe} item(s) complete (total pending unknown)."
+            )
+            return
+
+        completed = min(current_safe, total_safe)
+        percent = int((completed / total_safe) * 100)
+        self._status_bar.showMessage(
+            f"Progress: {completed}/{total_safe} item(s) complete ({percent}%)."
+        )
+
     def _on_extraction_complete(self, updated_session: SessionState) -> None:
         self._session = updated_session
         self._active_worker = None
@@ -414,8 +566,12 @@ class SpellScribeMainWindow(QMainWindow):
         self._update_action_states()
 
         extracted_count = sum(
-            1 for record in updated_session.records if record.status.value != "pending_extraction"
+            1
+            for record in updated_session.records
+            if record.spell_id in self._extract_scope_spell_ids
+            and record.status.value != "pending_extraction"
         )
+        self._extract_scope_spell_ids = set()
         self._status_bar.showMessage(
             f"Extraction complete - {extracted_count} spell(s) extracted."
         )
@@ -426,6 +582,7 @@ class SpellScribeMainWindow(QMainWindow):
         self._active_worker = None
         self._active_thread = None
         self._worker_running = False
+        self._extract_scope_spell_ids = set()
         self._update_action_states()
         QMessageBox.critical(self, title, message)
 
@@ -435,6 +592,7 @@ class SpellScribeMainWindow(QMainWindow):
         self._active_worker = None
         self._active_thread = None
         self._worker_running = False
+        self._extract_scope_spell_ids = set()
         self._update_action_states()
         self._status_bar.showMessage("Operation cancelled.")
 
