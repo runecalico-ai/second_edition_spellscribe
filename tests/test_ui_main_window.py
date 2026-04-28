@@ -3151,10 +3151,11 @@ class TestMainWindowPanelWiring(unittest.TestCase):
 
         with patch("app.ui.main_window.fitz.open", side_effect=RuntimeError("cannot open")), patch.object(
             win._doc_panel, "show_placeholder"
-        ) as mock_placeholder:
+        ) as mock_placeholder, patch.object(win._status_bar, "showMessage") as mock_status:
             win._on_spell_selected("spell-56")
 
         mock_placeholder.assert_called_once()
+        mock_status.assert_called_once_with("Failed to display PDF: cannot open", 5000)
 
     def test_spell_selection_shows_placeholder_when_routed_document_missing_for_pdf(self):
         win = self._make_window_with_panels()

@@ -164,7 +164,12 @@ class SpellScribeMainWindow(QMainWindow):
         if record is None:
             return
 
-        self._session.selected_spell_id = spell_id
+        if isinstance(self._session, SessionState):
+            self._session = self._session.model_copy(
+                update={"selected_spell_id": spell_id}
+            )
+        else:
+            self._session.selected_spell_id = spell_id
 
         if record.status.value == "pending_extraction":
             self._review_panel.show_pending_record(record)
@@ -196,8 +201,12 @@ class SpellScribeMainWindow(QMainWindow):
                         page_num=first.page,
                         highlight_regions=page_regions,
                     )
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 self._doc_panel.show_placeholder()
+                self._status_bar.showMessage(
+                    f"Failed to display PDF: {exc}",
+                    5000,
+                )
             return
 
         char_ranges = [
