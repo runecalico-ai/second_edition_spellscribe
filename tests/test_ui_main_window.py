@@ -93,7 +93,7 @@ class TestMainWindowToolbar(unittest.TestCase):
     def test_export_action_disabled_with_tooltip(self):
         win = self._make_window()
         self.assertFalse(win._action_export.isEnabled())
-        self.assertIn("not available", win._action_export.toolTip().lower())
+        self.assertIn("export", win._action_export.toolTip().lower())
 
     def test_extraction_actions_enabled_after_session_loaded(self):
         from app.ui.main_window import SpellScribeMainWindow
@@ -108,6 +108,7 @@ class TestMainWindowToolbar(unittest.TestCase):
         self.assertTrue(win._action_detect.isEnabled())
         self.assertTrue(win._action_extract_selected.isEnabled())
         self.assertTrue(win._action_extract_all.isEnabled())
+        self.assertTrue(win._action_export.isEnabled())
         # Cancel remains disabled until a worker is running
         self.assertFalse(win._action_cancel.isEnabled())
 
@@ -120,8 +121,7 @@ class TestMainWindowToolbar(unittest.TestCase):
         session = MagicMock()
         session.last_open_path = "/docs/phb.pdf"
         win._set_session(session, source_path="/docs/phb.pdf")
-        self.assertIn("phb.pdf", win.windowTitle())
-        self.assertIn("SpellScribe", win.windowTitle())
+        self.assertEqual(win.windowTitle(), "phb.pdf — SpellScribe")
 
     def test_settings_action_opens_settings_dialog(self):
         win = self._make_window()
@@ -241,6 +241,19 @@ class TestSpellListPanel(unittest.TestCase):
             + panel._pending_list.count()
         )
         self.assertEqual(total, 0)
+
+    def test_placeholder_message_visible_before_first_refresh(self):
+        panel = self._make_panel()
+
+        self.assertTrue(panel._placeholder_label.isVisible())
+        self.assertIn("open a document", panel._placeholder_label.text().lower())
+
+    def test_placeholder_hides_after_session_refresh(self):
+        panel = self._make_panel()
+
+        panel.refresh(self._make_session([]))
+
+        self.assertFalse(panel._placeholder_label.isVisible())
 
     def test_refresh_populates_confirmed_section(self):
         panel = self._make_panel()
@@ -815,6 +828,30 @@ class TestReviewPanelActions(unittest.TestCase):
             mock_mb.warning.assert_called_once()
             mock_save.assert_not_called()
         self.assertEqual(emitted, [])
+
+    def test_save_button_disabled_when_duplicate_preflight_conflict_exists(self):
+        panel, record, session = self._make_panel_with_confirmed_record()
+
+        with patch(
+            "app.ui.review_panel.get_confirmed_save_duplicate_conflict",
+            return_value=MagicMock(),
+        ):
+            panel.show_review_record(record, session)
+
+        self.assertFalse(panel._btn_save.isEnabled())
+        self.assertIn("duplicate", panel._btn_save.toolTip().lower())
+
+    def test_save_button_enabled_when_no_duplicate_preflight_conflict(self):
+        panel, record, session = self._make_panel_with_confirmed_record()
+
+        with patch(
+            "app.ui.review_panel.get_confirmed_save_duplicate_conflict",
+            return_value=None,
+        ):
+            panel.show_review_record(record, session)
+
+        self.assertTrue(panel._btn_save.isEnabled())
+        self.assertEqual(panel._btn_save.toolTip(), "")
 
     def test_save_proceeds_when_no_conflict(self):
         panel, record, session = self._make_panel_with_confirmed_record()
@@ -2466,7 +2503,7 @@ class TestDocumentOpenFlow(unittest.TestCase):
             win._open_document(same_path)
 
         mock_route.assert_not_called()
-        self.assertIn("same-file.pdf", win.windowTitle())
+        self.assertEqual(win.windowTitle(), "same-file.pdf — SpellScribe")
         self.assertIn(Path(same_path).name, win._status_bar.currentMessage())
         self.assertIs(win._session, existing_session)
         self.assertEqual(win._session.last_open_path, same_path)
@@ -2846,7 +2883,7 @@ class TestDocumentOpenFlow(unittest.TestCase):
             dir_arg = args[2] if len(args) > 2 else kwargs.get("dir", "")
             self.assertEqual(Path(dir_arg), Path("/my/docs"))
 
-    def test_export_choice_aborts_open_and_preserves_session(self):
+    def test_export_choice_preserves_session_when_export_not_completed(self):
         win = self._make_window()
         existing = MagicMock()
         existing.source_sha256_hex = "a" * 64
@@ -2861,7 +2898,9 @@ class TestDocumentOpenFlow(unittest.TestCase):
             export_btn = MagicMock()
             discard_btn = MagicMock()
             cancel_btn = MagicMock()
-            with patch("app.ui.main_window.QMessageBox", return_value=box):
+            with patch("app.ui.main_window.QMessageBox", return_value=box), patch.object(
+                win, "_on_export", return_value=False
+            ):
                 box.addButton.side_effect = [export_btn, discard_btn, cancel_btn]
                 box.clickedButton.return_value = export_btn
                 win._open_document("/new/file.pdf")
@@ -2899,8 +2938,48 @@ class TestDocumentOpenFlow(unittest.TestCase):
             win._open_document(new_path)
         self.assertEqual(win._session.source_sha256_hex, new_sha)
 
-    def test_different_sha_export_then_replace_deferred(self):
-        self.skipTest("Export not implemented in this change; deferred.")
+    def test_different_sha_export_then_replace_after_successful_export(self):
+        win = self._make_window()
+        existing = MagicMock()
+        existing.source_sha256_hex = "a" * 64
+        confirmed_record = MagicMock()
+        confirmed_record.status = MagicMock(value="confirmed")
+        existing.records = [confirmed_record]
+        win._session = existing
+
+        new_sha = "c" * 64
+        new_path = "/new/after-export.pdf"
+        routed = MagicMock()
+        routed.coordinate_map = CoordinateAwareTextMap(lines=[])
+
+        with patch("app.ui.main_window.compute_sha256_hex", return_value=new_sha), patch(
+            "app.ui.main_window.restore_session_state_for_source", return_value=None
+        ), patch("app.ui.main_window.route_document", return_value=routed), patch(
+            "app.ui.main_window.DocumentIdentityDialog"
+        ) as mock_id_dlg, patch("app.ui.main_window.QMessageBox") as mock_mb, patch.object(
+            win, "_on_export", return_value=True
+        ) as mock_export:
+            mock_id_dlg.return_value.exec.return_value = QDialog.DialogCode.Accepted
+            mock_id_dlg.return_value.get_result.return_value = MagicMock(
+                source_display_name="PHB",
+                page_offset=0,
+                force_ocr=False,
+            )
+
+            box = MagicMock()
+            export_btn = MagicMock()
+            discard_btn = MagicMock()
+            cancel_btn = MagicMock()
+            mock_mb.return_value = box
+            box.exec.return_value = 0
+            box.addButton.side_effect = [export_btn, discard_btn, cancel_btn]
+            box.clickedButton.return_value = export_btn
+
+            win._open_document(new_path)
+
+        mock_export.assert_called_once_with()
+        self.assertEqual(win._session.source_sha256_hex, new_sha)
+        self.assertEqual(win._session.last_open_path, new_path)
 
 
 class TestIdentityDialog(unittest.TestCase):

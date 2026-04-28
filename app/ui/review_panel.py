@@ -274,9 +274,40 @@ class ReviewPanel(QWidget):
                 self._btn_reextract.setToolTip("")
 
             self._has_validation_errors = False
+            self._update_save_preflight_state()
             self._stack.setCurrentWidget(self._review_widget)
         finally:
             self._loading = False
+
+    def _update_save_preflight_state(self) -> None:
+        if self._current_record is None or self._current_session is None:
+            self._btn_save.setEnabled(True)
+            self._btn_save.setToolTip("")
+            return
+
+        if self._current_record.status.value != "confirmed":
+            self._btn_save.setEnabled(True)
+            self._btn_save.setToolTip("")
+            return
+
+        try:
+            conflict = get_confirmed_save_duplicate_conflict(
+                self._current_session,
+                spell_id=self._current_record.spell_id,
+            )
+        except Exception:
+            self._btn_save.setEnabled(True)
+            self._btn_save.setToolTip("")
+            return
+
+        has_conflict = conflict is not None
+        self._btn_save.setEnabled(not has_conflict)
+        if has_conflict:
+            self._btn_save.setToolTip(
+                "Save is disabled due to a duplicate confirmed spell name."
+            )
+        else:
+            self._btn_save.setToolTip("")
 
     def _on_save_confirmed(self) -> None:
         if self._current_record is None or self._current_session is None:
@@ -564,6 +595,7 @@ class ReviewPanel(QWidget):
             self._has_validation_errors = True
             self._dirty_banner.setVisible(True)
             self._dirty_banner.setText(f"Invalid: {exc}")
+        self._update_save_preflight_state()
 
 
 def _parse_csv(text: str) -> list[str]:

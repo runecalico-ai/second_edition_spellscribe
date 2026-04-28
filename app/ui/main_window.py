@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QDialog,
     QLabel,
+    QInputDialog,
     QMainWindow,
     QMessageBox,
     QSplitter,
@@ -50,6 +52,7 @@ class SpellScribeMainWindow(QMainWindow):
         self._cancel_event: threading.Event = threading.Event()
         self._extract_scope_spell_ids: set[str] = set()
         self._routed_document = None
+        self._export_available = self._is_export_flow_available()
 
         self.setWindowTitle("SpellScribe")
         self._build_toolbar()
@@ -82,10 +85,13 @@ class SpellScribeMainWindow(QMainWindow):
         tb.addSeparator()
 
         self._action_export = tb.addAction("Export")
-        self._action_export.setToolTip(
-            "Export not available in this build - "
-            "the export dialog will be added in a future change."
-        )
+        if self._export_available:
+            self._action_export.setToolTip("Export JSON and Markdown for current session.")
+        else:
+            self._action_export.setToolTip(
+                "Export not available in this build - "
+                "the export dialog will be added in a future change."
+            )
         self._action_export.setEnabled(False)
         self._action_export.triggered.connect(self._on_export)
 
@@ -103,7 +109,30 @@ class SpellScribeMainWindow(QMainWindow):
         self._action_extract_selected.setEnabled(has_session and not worker_active)
         self._action_extract_all.setEnabled(has_session and not worker_active)
         self._action_cancel.setEnabled(worker_active)
+        self._action_export.setEnabled(self._export_available and has_session and not worker_active)
         self._action_settings.setEnabled(not worker_active)
+
+    def _is_export_flow_available(self) -> bool:
+        try:
+            from app import __version__
+            from app.pipeline.export import ExportScope, order_spells, to_json, to_markdown
+
+            del __version__, ExportScope, order_spells, to_json, to_markdown
+            return True
+        except Exception:
+            return False
+
+    def _sanitize_export_base_name(self) -> str:
+        default_name = getattr(self._config, "default_source_document", "").strip()
+        if default_name:
+            candidate = Path(default_name).stem
+        elif self._session is not None and getattr(self._session, "last_open_path", ""):
+            candidate = Path(self._session.last_open_path).stem
+        else:
+            candidate = "spells"
+
+        normalized = "_".join(part for part in candidate.replace("/", " ").split() if part)
+        return normalized or "spells"
 
     def _is_active_thread_running(self) -> bool:
         if self._active_thread is None:
@@ -155,7 +184,7 @@ class SpellScribeMainWindow(QMainWindow):
     def _set_session(self, session: SessionState, *, source_path: str) -> None:
         self._session = session
         filename = Path(source_path).name
-        self.setWindowTitle(f"{filename} - SpellScribe")
+        self.setWindowTitle(f"{filename} — SpellScribe")
         self._update_action_states()
         self._refresh_panels_from_session_selection()
 
@@ -194,6 +223,9 @@ class SpellScribeMainWindow(QMainWindow):
             self._session = self._session.model_copy(
                 update={"selected_spell_id": spell_id}
             )
+            record = next((r for r in self._session.records if r.spell_id == spell_id), None)
+            if record is None:
+                return
         else:
             self._session.selected_spell_id = spell_id
 
@@ -300,7 +332,7 @@ class SpellScribeMainWindow(QMainWindow):
             self._session.last_open_path = path
             self._refresh_routed_document_source_path(path)
             filename = Path(path).name
-            self.setWindowTitle(f"{filename} - SpellScribe")
+            self.setWindowTitle(f"{filename} — SpellScribe")
             config_changed = False
             import_dir = str(Path(path).parent)
             if self._config.last_import_directory != import_dir:
@@ -329,12 +361,14 @@ class SpellScribeMainWindow(QMainWindow):
                 box.exec()
 
                 clicked = box.clickedButton()
+                export_completed = False
                 if clicked is export_btn:
-                    self._on_export()
-                    return
+                    if not self._on_export():
+                        return
+                    export_completed = True
                 if clicked is cancel_btn or clicked is None:
                     return
-                if clicked is not discard_btn:
+                if clicked is not discard_btn and not export_completed:
                     return
 
         identity_result = None
@@ -647,12 +681,141 @@ class SpellScribeMainWindow(QMainWindow):
     def _on_session_ready(self, new_session: SessionState) -> None:
         self._session = new_session
 
-    def _on_export(self) -> None:
-        QMessageBox.information(
+    def _on_export(self) -> bool:
+        if self._session is None:
+            return False
+
+        if not self._export_available:
+            QMessageBox.information(
+                self,
+                "Export",
+                "Export is not available in this build. Integrate the export dialog to enable.",
+            )
+            return False
+
+        from app import __version__
+        from app.pipeline.export import ExportScope, order_spells, to_json, to_markdown
+
+        scope_labels = {
+            "Everything Extracted": ExportScope.EVERYTHING_EXTRACTED,
+            "Confirmed Only": ExportScope.CONFIRMED_ONLY,
+            "Needs Review Only": ExportScope.NEEDS_REVIEW_ONLY,
+        }
+        scope_values = list(scope_labels.keys())
+        default_scope = getattr(self._config, "last_export_scope", ExportScope.EVERYTHING_EXTRACTED.value)
+        default_scope_enum = ExportScope.EVERYTHING_EXTRACTED
+        try:
+            default_scope_enum = ExportScope(default_scope)
+        except Exception:
+            default_scope_enum = ExportScope.EVERYTHING_EXTRACTED
+
+        default_scope_label_by_value = {
+            ExportScope.EVERYTHING_EXTRACTED: "Everything Extracted",
+            ExportScope.CONFIRMED_ONLY: "Confirmed Only",
+            ExportScope.NEEDS_REVIEW_ONLY: "Needs Review Only",
+        }
+        default_label = default_scope_label_by_value.get(default_scope_enum, "Everything Extracted")
+        default_index = scope_values.index(default_label)
+
+        selected_label, ok = QInputDialog.getItem(
             self,
-            "Export",
-            "Export is not available in this build. Integrate the export dialog to enable.",
+            "Export Spells",
+            "Choose export scope:",
+            scope_values,
+            default_index,
+            False,
         )
+        if not ok:
+            return False
+
+        selected_scope = scope_labels[selected_label]
+        clean_only = False
+        if selected_scope != ExportScope.NEEDS_REVIEW_ONLY:
+            choice = QMessageBox.question(
+                self,
+                "Clean Export",
+                "Exclude spells that still need review?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.No,
+            )
+            if choice == QMessageBox.StandardButton.Cancel:
+                return False
+            clean_only = choice == QMessageBox.StandardButton.Yes
+
+        dirty_count = sum(1 for record in self._session.records if record.draft_dirty)
+        if dirty_count > 0:
+            choice = QMessageBox.question(
+                self,
+                "Unsaved Drafts",
+                f"{dirty_count} record(s) have unsaved drafts. Continue export anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if choice != QMessageBox.StandardButton.Yes:
+                return False
+
+        spells = order_spells(self._session.records, selected_scope)
+        clean_count = sum(1 for spell in spells if not spell.needs_review)
+        if (clean_only and clean_count == 0) or (not clean_only and len(spells) == 0):
+            QMessageBox.warning(
+                self,
+                "Export",
+                "No spells match the current export filters. Empty outputs will still be written.",
+            )
+
+        export_dir = Path(getattr(self._config, "export_directory", "") or str(Path.home()))
+        base_name = self._sanitize_export_base_name()
+
+        json_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export JSON",
+            str(export_dir / f"{base_name}.json"),
+            "JSON Files (*.json)",
+        )
+        if not json_path:
+            return False
+
+        markdown_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Markdown",
+            str(export_dir / f"{base_name}.md"),
+            "Markdown Files (*.md)",
+        )
+        if not markdown_path:
+            return False
+
+        try:
+            exported_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            to_json(
+                spells,
+                json_path,
+                clean_only=clean_only,
+                exported_at=exported_at,
+                spellscribe_version=__version__,
+            )
+            to_markdown(
+                spells,
+                markdown_path,
+                clean_only=clean_only,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Export Failed",
+                f"Unable to complete export: {exc}",
+            )
+            return False
+
+        self._config.export_directory = str(Path(json_path).parent)
+        self._config.last_export_scope = selected_scope.value
+        self._persist_config_if_needed(changed=True)
+
+        self._status_bar.showMessage(
+            f"Exported {len(spells)} spell(s) to JSON and Markdown."
+        )
+        return True
 
     def _on_settings(self) -> None:
         dlg = SettingsDialog(config=self._config, parent=self)

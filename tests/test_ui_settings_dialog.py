@@ -370,6 +370,7 @@ class TestSettingsDialogTestKey(unittest.TestCase):
     _SANITIZED_API_TEST_FAILURE_TEXT = (
         "Unable to validate API key. Please check your configuration and try again."
     )
+    _RUNTIME_REASON = "Reason: RuntimeError."
     _CLOSE_BLOCKED_TEXT = "Please wait for the API key test to finish before closing Settings."
 
     def _wait_until(self, predicate, timeout_ms=500) -> bool:
@@ -509,18 +510,20 @@ class TestSettingsDialogTestKey(unittest.TestCase):
         patcher, _ = self._patch_worker_completion(
             dlg,
             success=False,
-            message="invalid_api_key: backend token parse failure",
+            message=self._RUNTIME_REASON,
         )
         with patcher:
             dlg._on_test_api_key()
             completed = self._wait_until(
-                lambda: dlg._test_key_result.text()
-                == self._SANITIZED_API_TEST_FAILURE_TEXT,
+                lambda: "Reason:" in dlg._test_key_result.text(),
             )
 
         self.assertTrue(completed)
-        self.assertEqual(dlg._test_key_result.text(), self._SANITIZED_API_TEST_FAILURE_TEXT)
-        self.assertNotIn("invalid_api_key", dlg._test_key_result.text())
+        self.assertEqual(
+            dlg._test_key_result.text(),
+            f"{self._SANITIZED_API_TEST_FAILURE_TEXT} {self._RUNTIME_REASON}",
+        )
+        self.assertNotIn("token parse failure", dlg._test_key_result.text())
 
     def test_test_api_key_button_restores_enabled_state_rules_after_completion(self):
         config = _make_config(api_key_storage_mode="local_plaintext")
@@ -554,7 +557,10 @@ class TestSettingsDialogTestKey(unittest.TestCase):
             with patch("app.ui.settings_dialog.anthropic.Anthropic") as mock_anthropic:
                 dlg._on_test_api_key()
 
-        self.assertEqual(dlg._test_key_result.text(), self._SANITIZED_API_TEST_FAILURE_TEXT)
+        self.assertEqual(
+            dlg._test_key_result.text(),
+            f"{self._SANITIZED_API_TEST_FAILURE_TEXT} {self._RUNTIME_REASON}",
+        )
         self.assertNotIn("backend unavailable", dlg._test_key_result.text())
         mock_anthropic.assert_not_called()
 

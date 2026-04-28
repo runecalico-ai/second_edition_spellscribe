@@ -50,6 +50,19 @@ _API_TEST_CLOSE_BLOCKED_TEXT = (
 )
 
 
+def _api_key_failure_reason_from_exception(exc: Exception) -> str:
+    """Return a short, sanitized reason string for API key test failures."""
+    return f"Reason: {exc.__class__.__name__}."
+
+
+def _compose_api_key_failure_text(reason: str) -> str:
+    """Compose the user-facing failure text with an optional brief reason."""
+    cleaned_reason = reason.strip()
+    if not cleaned_reason:
+        return _API_KEY_TEST_FAILURE_TEXT
+    return f"{_API_KEY_TEST_FAILURE_TEXT} {cleaned_reason}"
+
+
 class _APIKeyTestWorker(QObject):
     """Runs API key validation in a background thread."""
 
@@ -74,11 +87,11 @@ class _APIKeyTestWorker(QObject):
 
             client.models.list()
             self.finished.emit(self._request_id, True, "API key is valid.")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             self.finished.emit(
                 self._request_id,
                 False,
-                _API_KEY_TEST_FAILURE_TEXT,
+                _api_key_failure_reason_from_exception(exc),
             )
 
 
@@ -373,8 +386,12 @@ class SettingsDialog(QDialog):
                     CREDENTIAL_SERVICE_NAME,
                     CREDENTIAL_ACCOUNT_NAME,
                 ) or ""
-        except Exception:  # noqa: BLE001
-            self._test_key_result.setText(_API_KEY_TEST_FAILURE_TEXT)
+        except Exception as exc:  # noqa: BLE001
+            self._test_key_result.setText(
+                _compose_api_key_failure_text(
+                    _api_key_failure_reason_from_exception(exc),
+                )
+            )
             self._test_key_result.setStyleSheet("color: red;")
             self._update_test_key_button_state()
             return
@@ -392,9 +409,13 @@ class SettingsDialog(QDialog):
 
         try:
             self._start_api_key_test_worker(request_id=request_id, api_key=api_key)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             self._api_test_in_progress = False
-            self._test_key_result.setText(_API_KEY_TEST_FAILURE_TEXT)
+            self._test_key_result.setText(
+                _compose_api_key_failure_text(
+                    _api_key_failure_reason_from_exception(exc),
+                )
+            )
             self._test_key_result.setStyleSheet("color: red;")
             self._update_test_key_button_state()
             return
@@ -432,7 +453,7 @@ class SettingsDialog(QDialog):
             self._test_key_result.setText(message)
             self._test_key_result.setStyleSheet("color: green;")
         else:
-            self._test_key_result.setText(_API_KEY_TEST_FAILURE_TEXT)
+            self._test_key_result.setText(_compose_api_key_failure_text(message))
             self._test_key_result.setStyleSheet("color: red;")
         self._update_test_key_button_state()
 

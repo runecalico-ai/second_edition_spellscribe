@@ -22,9 +22,14 @@ class SpellListPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._build_ui()
+        self.show()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
+
+        self._placeholder_label = QLabel("Open a document to begin.", self)
+        self._placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._placeholder_label)
 
         layout.addWidget(QLabel("Confirmed"))
         self._confirmed_list = QListWidget(self)
@@ -47,6 +52,11 @@ class SpellListPanel(QWidget):
         )
         layout.addWidget(self._pending_list)
 
+        self.show_placeholder()
+
+    def show_placeholder(self) -> None:
+        self._placeholder_label.setVisible(True)
+
     def refresh(
         self,
         session_state: SessionState,
@@ -59,6 +69,7 @@ class SpellListPanel(QWidget):
             if selected_spell_id is _USE_CURRENT_SELECTION
             else selected_spell_id
         )
+        self._placeholder_label.setVisible(False)
         items_by_spell_id: dict[str, QListWidgetItem] = {}
         list_widgets = (self._confirmed_list, self._needs_review_list, self._pending_list)
         blockers = [QSignalBlocker(list_widget) for list_widget in list_widgets]
