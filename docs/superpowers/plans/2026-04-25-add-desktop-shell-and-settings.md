@@ -3886,9 +3886,10 @@ if ($test_exit_code -ne 0) { exit $test_exit_code }
   Expected: Window appears with "SpellScribe" title and disabled toolbar actions (no document loaded).
     Evidence (2026-04-28): Process stayed running for 5 seconds without crashing, then was terminated to complete the smoke check.
 
-- [ ] **Final commit**
+- [x] **Final commit**
 
   ```pwsh
   git add app/ui/main_window.py
   git commit -m "feat: add dev __main__ launcher for SpellScribeMainWindow"
   ```
+    Evidence (2026-04-28): Commit `15fba7c` created after verification loop fixes.
