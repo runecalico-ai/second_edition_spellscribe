@@ -1,6 +1,7 @@
 """SpellScribe main application window."""
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -31,6 +32,9 @@ from app.ui.workers import DetectSpellsWorker, ExtractWorker
 
 if TYPE_CHECKING:
     from app.config import AppConfig
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class SpellScribeMainWindow(QMainWindow):
@@ -92,7 +96,7 @@ class SpellScribeMainWindow(QMainWindow):
 
     def _update_action_states(self) -> None:
         has_session = self._session is not None
-        worker_active = self._worker_running
+        worker_active = self._worker_running or self._is_active_thread_running()
 
         self._action_open.setEnabled(not worker_active)
         self._action_detect.setEnabled(has_session and not worker_active)
@@ -100,6 +104,28 @@ class SpellScribeMainWindow(QMainWindow):
         self._action_extract_all.setEnabled(has_session and not worker_active)
         self._action_cancel.setEnabled(worker_active)
         self._action_settings.setEnabled(not worker_active)
+
+    def _is_active_thread_running(self) -> bool:
+        if self._active_thread is None:
+            return False
+        try:
+            return self._active_thread.isRunning()
+        except RuntimeError:
+            # Thread wrapper can raise if underlying QObject is already deleted.
+            return False
+
+    def _set_worker_terminal_state(self) -> None:
+        self._active_worker = None
+        self._worker_running = False
+        self._update_action_states()
+
+    def _on_active_thread_finished(self, finished_thread: QThread | None = None) -> None:
+        if finished_thread is not None and finished_thread is not self._active_thread:
+            return
+        if self._is_active_thread_running():
+            return
+        self._active_thread = None
+        self._update_action_states()
 
     def _build_central_widget(self) -> None:
         from app.ui.document_panel import DocumentPanel
@@ -416,7 +442,11 @@ class SpellScribeMainWindow(QMainWindow):
         self._status_bar.showMessage(f"Opened: {Path(path).name}")
 
     def _on_detect_spells(self) -> None:
-        if self._session is None or self._routed_document is None:
+        if (
+            self._session is None
+            or self._routed_document is None
+            or self._is_active_thread_running()
+        ):
             return
 
         self._cancel_event = threading.Event()
@@ -440,6 +470,9 @@ class SpellScribeMainWindow(QMainWindow):
         thread.started.connect(worker.run)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(
+            lambda finished_thread=thread: self._on_active_thread_finished(finished_thread)
+        )
 
         self._active_thread = thread
         self._active_worker = worker
@@ -471,7 +504,7 @@ class SpellScribeMainWindow(QMainWindow):
         return pending_spell_ids
 
     def _start_extract_worker(self, mode: str) -> None:
-        if self._session is None:
+        if self._session is None or self._is_active_thread_running():
             return
 
         self._extract_scope_spell_ids = self._compute_extract_scope_spell_ids(mode)
@@ -512,6 +545,9 @@ class SpellScribeMainWindow(QMainWindow):
         thread.started.connect(worker.run)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(
+            lambda finished_thread=thread: self._on_active_thread_finished(finished_thread)
+        )
 
         self._active_thread = thread
         self._active_worker = worker
@@ -524,24 +560,26 @@ class SpellScribeMainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         active_thread = self._active_thread
-        thread_running = active_thread is not None and active_thread.isRunning()
+        thread_running = self._is_active_thread_running()
 
         if self._worker_running or thread_running:
             self._cancel_event.set()
 
-        if thread_running:
+        if thread_running and active_thread is not None:
             active_thread.quit()
             stopped_within_timeout = active_thread.wait(2000)
             if not stopped_within_timeout:
+                self._status_bar.showMessage(
+                    "Background worker is still shutting down; close cancelled.",
+                    5000,
+                )
                 event.ignore()
                 return
+            self._on_active_thread_finished(active_thread)
         super().closeEvent(event)
 
     def _on_spells_detected(self, count: int) -> None:
-        self._active_worker = None
-        self._active_thread = None
-        self._worker_running = False
-        self._update_action_states()
+        self._set_worker_terminal_state()
         self._status_bar.showMessage(
             f"Detection complete - {count} spell(s) pending extraction."
         )
@@ -569,10 +607,7 @@ class SpellScribeMainWindow(QMainWindow):
 
     def _on_extraction_complete(self, updated_session: SessionState) -> None:
         self._session = updated_session
-        self._active_worker = None
-        self._active_thread = None
-        self._worker_running = False
-        self._update_action_states()
+        self._set_worker_terminal_state()
 
         extracted_count = sum(
             1
@@ -587,22 +622,26 @@ class SpellScribeMainWindow(QMainWindow):
         if hasattr(self, "_spell_list_panel"):
             self._refresh_panels_from_session_selection()
 
+    def _user_safe_worker_error_message(self, title: str) -> str:
+        title_casefold = title.casefold()
+        if "detect" in title_casefold:
+            return "Spell detection could not be completed. Please try again."
+        if "extract" in title_casefold:
+            return "Spell extraction could not be completed. Please try again."
+        return "The operation could not be completed. Please try again."
+
     def _on_worker_failed(self, title: str, message: str) -> None:
-        self._active_worker = None
-        self._active_thread = None
-        self._worker_running = False
+        self._set_worker_terminal_state()
         self._extract_scope_spell_ids = set()
-        self._update_action_states()
-        QMessageBox.critical(self, title, message)
+        _LOGGER.error("Worker failed with title=%r message=%r", title, message)
+        user_message = self._user_safe_worker_error_message(title)
+        QMessageBox.critical(self, title, user_message)
 
     def _on_worker_cancelled(self) -> None:
         if not self._worker_running:
             return
-        self._active_worker = None
-        self._active_thread = None
-        self._worker_running = False
+        self._set_worker_terminal_state()
         self._extract_scope_spell_ids = set()
-        self._update_action_states()
         self._status_bar.showMessage("Operation cancelled.")
 
     def _on_session_ready(self, new_session: SessionState) -> None:

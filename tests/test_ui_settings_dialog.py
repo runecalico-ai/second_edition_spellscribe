@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import os
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -307,6 +308,22 @@ class TestCredentialControls(unittest.TestCase):
         dlg._toggle_key_visibility()
         self.assertEqual(dlg._key_field.echoMode(), QLineEdit.EchoMode.Normal)
 
+    def test_leaving_plaintext_mode_resets_key_visibility_controls(self):
+        from PySide6.QtWidgets import QLineEdit
+
+        dlg = self._make_dialog(mode="local_plaintext")
+        dlg._key_toggle_btn.click()
+        self.assertEqual(dlg._key_field.echoMode(), QLineEdit.EchoMode.Normal)
+        self.assertTrue(dlg._key_toggle_btn.isChecked())
+        self.assertEqual(dlg._key_toggle_btn.text(), "Hide")
+
+        dlg._rb_env.setChecked(True)
+        dlg._on_credential_mode_changed(None)
+
+        self.assertEqual(dlg._key_field.echoMode(), QLineEdit.EchoMode.Password)
+        self.assertFalse(dlg._key_toggle_btn.isChecked())
+        self.assertEqual(dlg._key_toggle_btn.text(), "Show")
+
     def test_test_api_key_disabled_in_env_mode_when_var_not_set(self):
         dlg = self._make_dialog(mode="env")
         with patch.dict("os.environ", {}, clear=True):
@@ -350,29 +367,93 @@ class TestSettingsDialogTestKey(unittest.TestCase):
 
         return SettingsDialog(config=config)
 
+    _SANITIZED_API_TEST_FAILURE_TEXT = (
+        "Unable to validate API key. Please check your configuration and try again."
+    )
+    _CLOSE_BLOCKED_TEXT = "Please wait for the API key test to finish before closing Settings."
+
+    def _wait_until(self, predicate, timeout_ms=500) -> bool:
+        deadline = time.monotonic() + (timeout_ms / 1000)
+        while time.monotonic() < deadline:
+            _get_app().processEvents()
+            if predicate():
+                return True
+            QTest.qWait(5)
+        _get_app().processEvents()
+        return bool(predicate())
+
+    def _patch_worker_completion(self, dlg, *, success: bool, message: str):
+        call_data: dict[str, str] = {}
+
+        def _start_worker(*, request_id: int, api_key: str) -> None:
+            call_data["api_key"] = api_key
+            QTimer.singleShot(
+                0,
+                lambda: dlg._on_api_test_finished(request_id, success, message),
+            )
+
+        return patch.object(dlg, "_start_api_key_test_worker", side_effect=_start_worker), call_data
+
+    def _patch_worker_with_stalled_thread(self, dlg):
+        call_data = {"count": 0}
+        threads: list[MagicMock] = []
+
+        def _start_worker(*, request_id: int, api_key: str) -> None:
+            del request_id, api_key
+            call_data["count"] += 1
+            thread = MagicMock()
+            worker = MagicMock()
+            dlg._api_test_thread = thread
+            dlg._api_test_worker = worker
+            threads.append(thread)
+
+        return (
+            patch.object(dlg, "_start_api_key_test_worker", side_effect=_start_worker),
+            call_data,
+            threads,
+        )
+
     def test_test_api_key_success_shows_success_label(self):
         config = _make_config(api_key_storage_mode="local_plaintext")
         dlg = self._make_dialog(config)
         dlg._key_field.setText("sk-ant-test")
-        with patch("app.ui.settings_dialog.anthropic.Anthropic") as mock_cls:
-            mock_client = MagicMock()
-            mock_cls.return_value = mock_client
-            mock_client.models.list.return_value = MagicMock()
+
+        patcher, _ = self._patch_worker_completion(
+            dlg,
+            success=True,
+            message="API key is valid.",
+        )
+        with patcher:
             dlg._on_test_api_key()
+
+            self.assertEqual(dlg._test_key_result.text(), "Testing...")
+            self.assertFalse(dlg._btn_test_key.isEnabled())
+            completed = self._wait_until(
+                lambda: "valid" in dlg._test_key_result.text().lower(),
+            )
+
+        self.assertTrue(completed)
         self.assertIn("valid", dlg._test_key_result.text().lower())
+        self.assertTrue(dlg._btn_test_key.isEnabled())
 
     def test_test_api_key_in_env_mode_resolves_env_key_and_shows_success(self):
         config = _make_config(api_key_storage_mode="env")
         dlg = self._make_dialog(config)
 
+        patcher, call_data = self._patch_worker_completion(
+            dlg,
+            success=True,
+            message="API key is valid.",
+        )
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-ant-env"}, clear=True):
-            with patch("app.ui.settings_dialog.anthropic.Anthropic") as mock_cls:
-                mock_client = MagicMock()
-                mock_cls.return_value = mock_client
-                mock_client.models.list.return_value = MagicMock()
+            with patcher:
                 dlg._on_test_api_key()
+                completed = self._wait_until(
+                    lambda: "valid" in dlg._test_key_result.text().lower(),
+                )
 
-        mock_cls.assert_called_once_with(api_key="sk-ant-env")
+        self.assertTrue(completed)
+        self.assertEqual(call_data["api_key"], "sk-ant-env")
         self.assertIn("valid", dlg._test_key_result.text().lower())
 
     def test_test_api_key_in_credential_manager_mode_resolves_key_and_shows_success(self):
@@ -381,14 +462,20 @@ class TestSettingsDialogTestKey(unittest.TestCase):
         mock_keyring = MagicMock()
         mock_keyring.get_password.return_value = "sk-ant-cred"
 
+        patcher, call_data = self._patch_worker_completion(
+            dlg,
+            success=True,
+            message="API key is valid.",
+        )
         with patch.dict("sys.modules", {"keyring": mock_keyring}):
-            with patch("app.ui.settings_dialog.anthropic.Anthropic") as mock_cls:
-                mock_client = MagicMock()
-                mock_cls.return_value = mock_client
-                mock_client.models.list.return_value = MagicMock()
+            with patcher:
                 dlg._on_test_api_key()
+                completed = self._wait_until(
+                    lambda: "valid" in dlg._test_key_result.text().lower(),
+                )
 
-        mock_cls.assert_called_once_with(api_key="sk-ant-cred")
+        self.assertTrue(completed)
+        self.assertEqual(call_data["api_key"], "sk-ant-cred")
         self.assertIn("valid", dlg._test_key_result.text().lower())
 
     def test_test_api_key_uses_current_unsaved_mode_selection(self):
@@ -398,24 +485,64 @@ class TestSettingsDialogTestKey(unittest.TestCase):
         dlg._on_credential_mode_changed(None)
         dlg._key_field.setText("sk-ant-unsaved")
 
+        patcher, call_data = self._patch_worker_completion(
+            dlg,
+            success=True,
+            message="API key is valid.",
+        )
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-ant-env"}, clear=True):
-            with patch("app.ui.settings_dialog.anthropic.Anthropic") as mock_cls:
-                mock_client = MagicMock()
-                mock_cls.return_value = mock_client
-                mock_client.models.list.return_value = MagicMock()
+            with patcher:
                 dlg._on_test_api_key()
+                completed = self._wait_until(
+                    lambda: "valid" in dlg._test_key_result.text().lower(),
+                )
 
-        mock_cls.assert_called_once_with(api_key="sk-ant-unsaved")
+        self.assertTrue(completed)
+        self.assertEqual(call_data["api_key"], "sk-ant-unsaved")
         self.assertIn("valid", dlg._test_key_result.text().lower())
 
     def test_test_api_key_failure_shows_error_label(self):
         config = _make_config(api_key_storage_mode="local_plaintext")
         dlg = self._make_dialog(config)
         dlg._key_field.setText("sk-ant-test")
-        with patch("app.ui.settings_dialog.anthropic.Anthropic") as mock_cls:
-            mock_cls.return_value.models.list.side_effect = Exception("invalid_api_key")
+
+        patcher, _ = self._patch_worker_completion(
+            dlg,
+            success=False,
+            message="invalid_api_key: backend token parse failure",
+        )
+        with patcher:
             dlg._on_test_api_key()
-        self.assertIn("invalid_api_key", dlg._test_key_result.text())
+            completed = self._wait_until(
+                lambda: dlg._test_key_result.text()
+                == self._SANITIZED_API_TEST_FAILURE_TEXT,
+            )
+
+        self.assertTrue(completed)
+        self.assertEqual(dlg._test_key_result.text(), self._SANITIZED_API_TEST_FAILURE_TEXT)
+        self.assertNotIn("invalid_api_key", dlg._test_key_result.text())
+
+    def test_test_api_key_button_restores_enabled_state_rules_after_completion(self):
+        config = _make_config(api_key_storage_mode="local_plaintext")
+        dlg = self._make_dialog(config)
+        dlg._key_field.setText("sk-ant-test")
+
+        captured_request: dict[str, int] = {}
+
+        def _start_worker(*, request_id: int, api_key: str) -> None:
+            captured_request["id"] = request_id
+
+        with patch.object(dlg, "_start_api_key_test_worker", side_effect=_start_worker):
+            dlg._on_test_api_key()
+
+        self.assertEqual(dlg._test_key_result.text(), "Testing...")
+        self.assertFalse(dlg._btn_test_key.isEnabled())
+
+        dlg._key_field.setText("")
+        self.assertFalse(dlg._btn_test_key.isEnabled())
+
+        dlg._on_api_test_finished(captured_request["id"], True, "API key is valid.")
+        self.assertFalse(dlg._btn_test_key.isEnabled())
 
     def test_test_api_key_credential_manager_keyring_failure_shows_inline_error(self):
         config = _make_config(api_key_storage_mode="credential_manager")
@@ -427,6 +554,123 @@ class TestSettingsDialogTestKey(unittest.TestCase):
             with patch("app.ui.settings_dialog.anthropic.Anthropic") as mock_anthropic:
                 dlg._on_test_api_key()
 
-        self.assertIn("Failed to load API key", dlg._test_key_result.text())
-        self.assertIn("backend unavailable", dlg._test_key_result.text())
+        self.assertEqual(dlg._test_key_result.text(), self._SANITIZED_API_TEST_FAILURE_TEXT)
+        self.assertNotIn("backend unavailable", dlg._test_key_result.text())
         mock_anthropic.assert_not_called()
+
+    def test_cancel_during_in_progress_api_test_requests_worker_shutdown(self):
+        config = _make_config(api_key_storage_mode="local_plaintext")
+        dlg = self._make_dialog(config)
+        dlg._key_field.setText("sk-ant-test")
+
+        patcher, _call_data, threads = self._patch_worker_with_stalled_thread(dlg)
+        with patcher:
+            dlg._on_test_api_key()
+            active_request_id = dlg._active_api_test_request_id
+
+            dlg._on_cancel()
+
+        self.assertEqual(len(threads), 1)
+        threads[0].requestInterruption.assert_called_once()
+        threads[0].quit.assert_called_once()
+        threads[0].wait.assert_called_once_with(dlg._api_test_shutdown_wait_ms)
+        self.assertFalse(dlg._api_test_in_progress)
+        self.assertEqual(dlg._active_api_test_request_id, active_request_id + 1)
+
+    def test_close_during_in_progress_api_test_requests_worker_shutdown(self):
+        config = _make_config(api_key_storage_mode="local_plaintext")
+        dlg = self._make_dialog(config)
+        dlg._key_field.setText("sk-ant-test")
+        dlg.show()
+        _get_app().processEvents()
+
+        patcher, _call_data, threads = self._patch_worker_with_stalled_thread(dlg)
+        with patcher:
+            dlg._on_test_api_key()
+            active_request_id = dlg._active_api_test_request_id
+
+            dlg.close()
+            _get_app().processEvents()
+
+        self.assertEqual(len(threads), 1)
+        threads[0].requestInterruption.assert_called_once()
+        threads[0].quit.assert_called_once()
+        threads[0].wait.assert_called_once_with(dlg._api_test_shutdown_wait_ms)
+        self.assertFalse(dlg._api_test_in_progress)
+        self.assertEqual(dlg._active_api_test_request_id, active_request_id + 1)
+
+    def test_shutdown_api_test_worker_waits_for_thread_exit(self):
+        config = _make_config(api_key_storage_mode="local_plaintext")
+        dlg = self._make_dialog(config)
+
+        thread = MagicMock()
+        thread.wait.return_value = True
+        dlg._api_test_thread = thread
+        dlg._api_test_worker = MagicMock()
+        dlg._api_test_in_progress = True
+
+        did_stop = dlg._shutdown_api_test_worker(
+            invalidate_request=True,
+            wait_timeout_ms=321,
+        )
+
+        self.assertTrue(did_stop)
+        thread.requestInterruption.assert_called_once()
+        thread.quit.assert_called_once()
+        thread.wait.assert_called_once_with(321)
+        self.assertIsNone(dlg._api_test_thread)
+        self.assertIsNone(dlg._api_test_worker)
+        self.assertFalse(dlg._api_test_in_progress)
+
+    def test_close_is_blocked_when_api_test_thread_does_not_terminate(self):
+        config = _make_config(api_key_storage_mode="local_plaintext")
+        dlg = self._make_dialog(config)
+        dlg._key_field.setText("sk-ant-test")
+        dlg.show()
+        _get_app().processEvents()
+
+        patcher, _call_data, threads = self._patch_worker_with_stalled_thread(dlg)
+        with patcher:
+            dlg._on_test_api_key()
+            threads[0].wait.return_value = False
+
+            closed = dlg.close()
+            _get_app().processEvents()
+
+        self.assertFalse(closed)
+        self.assertTrue(dlg.isVisible())
+        self.assertEqual(dlg.result(), 0)
+        self.assertEqual(dlg._test_key_result.text(), self._CLOSE_BLOCKED_TEXT)
+        threads[0].requestInterruption.assert_called_once()
+        threads[0].quit.assert_called_once()
+        threads[0].wait.assert_called_once_with(dlg._api_test_shutdown_wait_ms)
+
+    def test_timeout_prevents_overlap_until_prior_thread_clears(self):
+        config = _make_config(api_key_storage_mode="local_plaintext")
+        dlg = self._make_dialog(config)
+        dlg._key_field.setText("sk-ant-test")
+
+        patcher, call_data, threads = self._patch_worker_with_stalled_thread(dlg)
+        with patcher:
+            dlg._on_test_api_key()
+            active_request_id = dlg._active_api_test_request_id
+            self.assertEqual(call_data["count"], 1)
+
+            dlg._on_api_test_timeout()
+
+            self.assertFalse(dlg._api_test_in_progress)
+            self.assertEqual(dlg._active_api_test_request_id, active_request_id + 1)
+            self.assertEqual(dlg._test_key_result.text(), "API key test timed out. Please try again.")
+            self.assertFalse(dlg._btn_test_key.isEnabled())
+            threads[0].quit.assert_called_once()
+
+            dlg._on_test_api_key()
+            self.assertEqual(call_data["count"], 1)
+
+            dlg._api_test_thread = None
+            dlg._api_test_worker = None
+            dlg._update_test_key_button_state()
+            self.assertTrue(dlg._btn_test_key.isEnabled())
+
+            dlg._on_test_api_key()
+            self.assertEqual(call_data["count"], 2)

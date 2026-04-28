@@ -14,8 +14,8 @@ except ImportError:  # pragma: no cover
                 raise RuntimeError("anthropic package is not installed")
 
     anthropic = _AnthropicStub()  # type: ignore[assignment]
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
-    QApplication,
     QButtonGroup,
     QCheckBox,
     QDialog,
@@ -42,6 +42,46 @@ if TYPE_CHECKING:
     from app.config import AppConfig
 
 
+_API_KEY_TEST_FAILURE_TEXT = (
+    "Unable to validate API key. Please check your configuration and try again."
+)
+_API_TEST_CLOSE_BLOCKED_TEXT = (
+    "Please wait for the API key test to finish before closing Settings."
+)
+
+
+class _APIKeyTestWorker(QObject):
+    """Runs API key validation in a background thread."""
+
+    finished = Signal(int, bool, str)
+
+    def __init__(self, *, request_id: int, api_key: str, timeout_seconds: float) -> None:
+        super().__init__()
+        self._request_id = request_id
+        self._api_key = api_key
+        self._timeout_seconds = timeout_seconds
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            try:
+                client = anthropic.Anthropic(
+                    api_key=self._api_key,
+                    timeout=self._timeout_seconds,
+                )
+            except TypeError:
+                client = anthropic.Anthropic(api_key=self._api_key)
+
+            client.models.list()
+            self.finished.emit(self._request_id, True, "API key is valid.")
+        except Exception:  # noqa: BLE001
+            self.finished.emit(
+                self._request_id,
+                False,
+                _API_KEY_TEST_FAILURE_TEXT,
+            )
+
+
 class SettingsDialog(QDialog):
     """Edit app configuration and persist only on Save."""
 
@@ -49,6 +89,15 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self._original_config = config
         self._working_config = copy.deepcopy(config)
+        self._api_test_timeout_ms = 10_000
+        self._api_test_shutdown_wait_ms = 250
+        self._api_test_in_progress = False
+        self._active_api_test_request_id = 0
+        self._api_test_thread: QThread | None = None
+        self._api_test_worker: _APIKeyTestWorker | None = None
+        self._api_test_timeout_timer = QTimer(self)
+        self._api_test_timeout_timer.setSingleShot(True)
+        self._api_test_timeout_timer.timeout.connect(self._on_api_test_timeout)
         self.setWindowTitle("Settings")
         self._build_ui()
 
@@ -218,6 +267,9 @@ class SettingsDialog(QDialog):
         self._plaintext_error_label.setText("")
 
         if not is_plaintext:
+            self._key_field.setEchoMode(QLineEdit.EchoMode.Password)
+            self._key_toggle_btn.setChecked(False)
+            self._key_toggle_btn.setText("Show")
             self._plaintext_confirm_check.setChecked(False)
 
         self._update_test_key_button_state()
@@ -232,6 +284,10 @@ class SettingsDialog(QDialog):
             self._key_toggle_btn.setText("Show")
 
     def _update_test_key_button_state(self) -> None:
+        if self._api_test_in_progress or self._api_test_thread is not None:
+            self._btn_test_key.setEnabled(False)
+            return
+
         if self._rb_env.isChecked():
             enabled = bool(os.environ.get("ANTHROPIC_API_KEY"))
         elif self._rb_local_plaintext.isChecked():
@@ -247,7 +303,64 @@ class SettingsDialog(QDialog):
             can_save = True
         self._save_button.setEnabled(can_save)
 
+    def _shutdown_api_test_worker(
+        self,
+        *,
+        invalidate_request: bool,
+        wait_timeout_ms: int = 0,
+    ) -> bool:
+        has_active_test = self._api_test_in_progress or self._api_test_thread is not None
+        if not has_active_test:
+            return True
+
+        self._api_test_timeout_timer.stop()
+        if invalidate_request:
+            self._active_api_test_request_id += 1
+        self._api_test_in_progress = False
+
+        thread_exited = self._api_test_thread is None
+
+        if self._api_test_worker is not None:
+            try:
+                self._api_test_worker.finished.disconnect(self._on_api_test_finished)
+            except (RuntimeError, TypeError):
+                pass
+
+        if self._api_test_thread is not None:
+            self._api_test_thread.requestInterruption()
+            self._api_test_thread.quit()
+            if wait_timeout_ms > 0:
+                try:
+                    thread_exited = bool(self._api_test_thread.wait(wait_timeout_ms))
+                except (RuntimeError, TypeError):
+                    # If the wrapped C++ object is already deleted, treat as stopped.
+                    thread_exited = True
+            else:
+                thread_exited = False
+
+        if thread_exited:
+            self._api_test_thread = None
+            self._api_test_worker = None
+
+        self._update_test_key_button_state()
+        return thread_exited
+
+    def _prepare_for_dialog_close(self) -> bool:
+        if self._shutdown_api_test_worker(
+            invalidate_request=True,
+            wait_timeout_ms=self._api_test_shutdown_wait_ms,
+        ):
+            return True
+
+        self._test_key_result.setText(_API_TEST_CLOSE_BLOCKED_TEXT)
+        self._test_key_result.setStyleSheet("color: grey;")
+        self._update_test_key_button_state()
+        return False
+
     def _on_test_api_key(self) -> None:
+        if self._api_test_in_progress or self._api_test_thread is not None:
+            return
+
         try:
             if self._rb_env.isChecked():
                 api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -260,8 +373,8 @@ class SettingsDialog(QDialog):
                     CREDENTIAL_SERVICE_NAME,
                     CREDENTIAL_ACCOUNT_NAME,
                 ) or ""
-        except Exception as exc:  # noqa: BLE001
-            self._test_key_result.setText(f"Failed to load API key: {exc}")
+        except Exception:  # noqa: BLE001
+            self._test_key_result.setText(_API_KEY_TEST_FAILURE_TEXT)
             self._test_key_result.setStyleSheet("color: red;")
             self._update_test_key_button_state()
             return
@@ -270,20 +383,87 @@ class SettingsDialog(QDialog):
             self._test_key_result.setText("No API key to test.")
             return
 
-        self._btn_test_key.setEnabled(False)
+        self._active_api_test_request_id += 1
+        request_id = self._active_api_test_request_id
+        self._api_test_in_progress = True
+        self._update_test_key_button_state()
         self._test_key_result.setText("Testing...")
-        QApplication.processEvents()
+        self._test_key_result.setStyleSheet("color: grey;")
 
         try:
-            client = anthropic.Anthropic(api_key=api_key)
-            client.models.list()
-            self._test_key_result.setText("API key is valid.")
-            self._test_key_result.setStyleSheet("color: green;")
-        except Exception as exc:  # noqa: BLE001
-            self._test_key_result.setText(f"{exc}")
+            self._start_api_key_test_worker(request_id=request_id, api_key=api_key)
+        except Exception:  # noqa: BLE001
+            self._api_test_in_progress = False
+            self._test_key_result.setText(_API_KEY_TEST_FAILURE_TEXT)
             self._test_key_result.setStyleSheet("color: red;")
-        finally:
             self._update_test_key_button_state()
+            return
+
+        self._api_test_timeout_timer.start(self._api_test_timeout_ms)
+
+    def _start_api_key_test_worker(self, *, request_id: int, api_key: str) -> None:
+        thread = QThread(self)
+        worker = _APIKeyTestWorker(
+            request_id=request_id,
+            api_key=api_key,
+            timeout_seconds=self._api_test_timeout_ms / 1000,
+        )
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_api_test_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_api_test_thread_finished)
+
+        self._api_test_thread = thread
+        self._api_test_worker = worker
+        thread.start()
+
+    @Slot(int, bool, str)
+    def _on_api_test_finished(self, request_id: int, success: bool, message: str) -> None:
+        if request_id != self._active_api_test_request_id:
+            return
+
+        self._api_test_timeout_timer.stop()
+        self._api_test_in_progress = False
+        if success:
+            self._test_key_result.setText(message)
+            self._test_key_result.setStyleSheet("color: green;")
+        else:
+            self._test_key_result.setText(_API_KEY_TEST_FAILURE_TEXT)
+            self._test_key_result.setStyleSheet("color: red;")
+        self._update_test_key_button_state()
+
+    @Slot()
+    def _on_api_test_timeout(self) -> None:
+        if not self._api_test_in_progress and self._api_test_thread is None:
+            return
+
+        self._test_key_result.setText("API key test timed out. Please try again.")
+        self._test_key_result.setStyleSheet("color: red;")
+        self._shutdown_api_test_worker(invalidate_request=True)
+
+    @Slot()
+    def _on_api_test_thread_finished(self) -> None:
+        if self.sender() is self._api_test_thread:
+            self._api_test_thread = None
+            self._api_test_worker = None
+        self._update_test_key_button_state()
+
+    def done(self, result: int) -> None:
+        if not self._prepare_for_dialog_close():
+            return
+        super().done(result)
+
+    def reject(self) -> None:
+        self.done(int(QDialog.DialogCode.Rejected))
+
+    def close(self) -> bool:
+        if not self._prepare_for_dialog_close():
+            return False
+        return super().close()
 
     def _apply_fields_to_working_config(self) -> None:
         self._working_config.stage1_model = self._field_stage1_model.text().strip()

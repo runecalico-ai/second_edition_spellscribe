@@ -81,35 +81,35 @@ from app.models import CoordinateAwareTextMap, TextRegion, Spell
 - Modify: `requirements.txt`
 - Create: `app/ui/__init__.py`
 
-- [ ] **Step 0.1: Add PySide6 to requirements.txt**
+- [x] **Step 0.1: Add PySide6 to requirements.txt**
 
   Append after `python-docx>=1.2,<2`:
   ```
   PySide6>=6.7,<7
   ```
 
-- [ ] **Step 0.2: Install the new dependency**
+- [x] **Step 0.2: Install the new dependency**
 
   ```pwsh
   pip install "PySide6>=6.7,<7"
   ```
   Expected: PySide6 and its Qt dependencies install without error.
 
-- [ ] **Step 0.3: Create the ui package**
+- [x] **Step 0.3: Create the ui package**
 
   Create `app/ui/__init__.py` with empty content (just a docstring is fine):
   ```python
   """SpellScribe desktop UI package."""
   ```
 
-- [ ] **Step 0.4: Verify PySide6 import works**
+- [x] **Step 0.4: Verify PySide6 import works**
 
   ```pwsh
   python -c "from PySide6.QtWidgets import QApplication; print('PySide6 OK')"
   ```
   Expected output: `PySide6 OK`
 
-- [ ] **Step 0.5: Commit**
+- [x] **Step 0.5: Commit**
 
   ```pwsh
   git add requirements.txt app/ui/__init__.py
@@ -227,7 +227,7 @@ class TestMainWindowToolbar(unittest.TestCase):
         self.assertIn("SpellScribe", win.windowTitle())
 ```
 
-- [ ] **Step 1.2: Run the tests to confirm they fail**
+- [x] **Step 1.2: Run the tests to confirm they fail**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -235,7 +235,7 @@ class TestMainWindowToolbar(unittest.TestCase):
   ```
   Expected: `ModuleNotFoundError: No module named 'app.ui.main_window'`
 
-- [ ] **Step 1.3: Create `app/ui/main_window.py`**
+- [x] **Step 1.3: Create `app/ui/main_window.py`**
 
   ```python
   """SpellScribe main application window."""
@@ -400,7 +400,7 @@ class TestMainWindowToolbar(unittest.TestCase):
           pass  # Implemented in Task 10
   ```
 
-- [ ] **Step 1.4: Run tests and confirm they pass**
+- [x] **Step 1.4: Run tests and confirm they pass**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -408,7 +408,7 @@ class TestMainWindowToolbar(unittest.TestCase):
   ```
   Expected: All 7 tests pass.
 
-- [ ] **Step 1.5: Commit**
+- [x] **Step 1.5: Commit**
 
   ```pwsh
   git add app/ui/main_window.py tests/test_ui_main_window.py
@@ -502,7 +502,7 @@ class TestDocumentPanel(unittest.TestCase):
   ```
   Expected: `ModuleNotFoundError: No module named 'app.ui.document_panel'`
 
-- [ ] **Step 2.3: Create `app/ui/document_panel.py`**
+- [x] **Step 2.3: Create `app/ui/document_panel.py`**
 
   ```python
   """Document viewer panel: PDF rendering and DOCX text display."""
@@ -648,7 +648,7 @@ class TestDocumentPanel(unittest.TestCase):
           self._stack.setCurrentWidget(self._docx_edit)
   ```
 
-- [ ] **Step 2.4: Run tests to confirm they pass**
+- [x] **Step 2.4: Run tests to confirm they pass**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -656,7 +656,7 @@ class TestDocumentPanel(unittest.TestCase):
   ```
   Expected: All 6 tests pass.
 
-- [ ] **Step 2.5: Commit**
+- [x] **Step 2.5: Commit**
 
   ```pwsh
   git add app/ui/document_panel.py tests/test_ui_main_window.py
@@ -765,7 +765,7 @@ class TestSpellListPanel(unittest.TestCase):
   ```
   Expected: `ModuleNotFoundError: No module named 'app.ui.spell_list_panel'`
 
-- [ ] **Step 3.3: Create `app/ui/spell_list_panel.py`**
+- [x] **Step 3.3: Create `app/ui/spell_list_panel.py`**
 
   ```python
   """Three-section spell list panel: Confirmed | Needs Review | Pending."""
@@ -874,7 +874,7 @@ class TestSpellListPanel(unittest.TestCase):
       return f"[{record.spell_id[:8]}]"
   ```
 
-- [ ] **Step 3.4: Run tests and confirm they pass**
+- [x] **Step 3.4: Run tests and confirm they pass**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -882,7 +882,7 @@ class TestSpellListPanel(unittest.TestCase):
   ```
   Expected: All 5 tests pass.
 
-- [ ] **Step 3.5: Commit**
+- [x] **Step 3.5: Commit**
 
   ```pwsh
   git add app/ui/spell_list_panel.py tests/test_ui_main_window.py
@@ -1022,7 +1022,7 @@ class TestReviewPanel(unittest.TestCase):
   ```
   Expected: `ModuleNotFoundError: No module named 'app.ui.review_panel'`
 
-- [ ] **Step 4.3: Create `app/ui/review_panel.py`**
+- [x] **Step 4.3: Create `app/ui/review_panel.py`**
 
   ```python
   """Right-side panel: pending status view or review editor."""
@@ -1328,7 +1328,7 @@ class TestReviewPanel(unittest.TestCase):
 
   > **Note:** `QVBoxLayout`, `QRadioButton`, and `QDialogButtonBox` must all be imported at module level in `review_panel.py` (not locally inside `_on_accept`) so they can be patched in tests.
 
-- [ ] **Step 4.4: Run tests to confirm they pass**
+- [x] **Step 4.4: Run tests to confirm they pass**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -1336,7 +1336,7 @@ class TestReviewPanel(unittest.TestCase):
   ```
   Expected: All 7 tests pass.
 
-- [ ] **Step 4.5: Commit**
+- [x] **Step 4.5: Commit**
 
   ```pwsh
   git add app/ui/review_panel.py tests/test_ui_main_window.py
@@ -1594,7 +1594,7 @@ class TestReviewPanelActions(unittest.TestCase):
   ```
   Expected: FAIL — test_accept_non_conflicting_record_commits_and_emits_session_changed fails because _on_accept is a stub.
 
-- [ ] **Step 5.3: Implement review action handlers in `app/ui/review_panel.py`**
+- [x] **Step 5.3: Implement review action handlers in `app/ui/review_panel.py`**
 
   Replace the five stub action handler methods:
 
@@ -1717,7 +1717,7 @@ class TestReviewPanelActions(unittest.TestCase):
 
   > **Note:** `QDialog`, `QDialogButtonBox`, `QInputDialog`, and `QMessageBox` are already imported at module level in Task 4.3's `review_panel.py` imports. No additional import needed here.
 
-- [ ] **Step 5.4: Run tests to confirm they pass**
+- [x] **Step 5.4: Run tests to confirm they pass**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -1733,7 +1733,7 @@ class TestReviewPanelActions(unittest.TestCase):
   ```
   Expected: All existing tests still pass; new tests pass.
 
-- [ ] **Step 5.6: Commit**
+- [x] **Step 5.6: Commit**
 
   ```pwsh
   git add app/ui/review_panel.py tests/test_ui_main_window.py
@@ -2014,7 +2014,7 @@ class TestWorkers(unittest.TestCase):
         self.assertEqual(cancelled_calls, [True])
 ```
 
-- [ ] **Step 6.2: Run to confirm failure**
+- [x] **Step 6.2: Run to confirm failure**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -2022,7 +2022,7 @@ class TestWorkers(unittest.TestCase):
   ```
   Expected: `ModuleNotFoundError: No module named 'app.ui.workers'`
 
-- [ ] **Step 6.3: Create `app/ui/workers.py`**
+- [x] **Step 6.3: Create `app/ui/workers.py`**
 
   ```python
   """QObject-based workers for background extraction jobs."""
@@ -2163,7 +2163,7 @@ class TestWorkers(unittest.TestCase):
 > This deviation should be reflected in a spec amendment to the desktop-workbench spec.
 > The current spec text does not match the implemented behavior.
 
-- [ ] **Step 6.4: Run tests to confirm they pass**
+- [x] **Step 6.4: Run tests to confirm they pass**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -2171,7 +2171,7 @@ class TestWorkers(unittest.TestCase):
   ```
   Expected: All 9 tests pass.
 
-- [ ] **Step 6.5: Commit**
+- [x] **Step 6.5: Commit**
 
   ```pwsh
   git add app/ui/workers.py tests/test_ui_main_window.py
@@ -2294,7 +2294,7 @@ class TestMainWindowWorkers(unittest.TestCase):
         self.assertNotEqual(win._status_bar.currentMessage(), "")
 ```
 
-- [ ] **Step 7.2: Run to confirm failure**
+- [x] **Step 7.2: Run to confirm failure**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -2302,7 +2302,7 @@ class TestMainWindowWorkers(unittest.TestCase):
   ```
   Expected: Tests fail because `_on_detect_spells` etc. are stubs.
 
-- [ ] **Step 7.3: Implement worker orchestration in `app/ui/main_window.py`**
+- [x] **Step 7.3: Implement worker orchestration in `app/ui/main_window.py`**
 
   Add these imports to `app/ui/main_window.py`:
   ```python
@@ -2434,7 +2434,7 @@ class TestMainWindowWorkers(unittest.TestCase):
       )
   ```
 
-- [ ] **Step 7.4: Run tests to confirm they pass**
+- [x] **Step 7.4: Run tests to confirm they pass**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -2442,7 +2442,7 @@ class TestMainWindowWorkers(unittest.TestCase):
   ```
   Expected: All 8 tests pass.
 
-- [ ] **Step 7.5: Run full suite to check for regressions**
+- [x] **Step 7.5: Run full suite to check for regressions**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -2450,7 +2450,7 @@ class TestMainWindowWorkers(unittest.TestCase):
   ```
   Expected: All tests pass.
 
-- [ ] **Step 7.6: Commit**
+- [x] **Step 7.6: Commit**
 
   ```pwsh
   git add app/ui/main_window.py tests/test_ui_main_window.py
@@ -2660,7 +2660,7 @@ class TestIdentityDialog(unittest.TestCase):
         self.assertEqual(result.page_offset, 10)
 ```
 
-- [ ] **Step 8.2: Run to confirm failure**
+- [x] **Step 8.2: Run to confirm failure**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -2668,7 +2668,7 @@ class TestIdentityDialog(unittest.TestCase):
   ```
   Expected: `ModuleNotFoundError: No module named 'app.ui.identity_dialog'` and open flow tests fail.
 
-- [ ] **Step 8.3: Create `app/ui/identity_dialog.py`**
+- [x] **Step 8.3: Create `app/ui/identity_dialog.py`**
 
   ```python
   """Dialog for capturing document identity metadata for unknown SHA-256 hashes."""
@@ -2739,7 +2739,7 @@ class TestIdentityDialog(unittest.TestCase):
           )
   ```
 
-- [ ] **Step 8.4: Implement `_open_document` and `_on_open_file` in `app/ui/main_window.py`**
+- [x] **Step 8.4: Implement `_open_document` and `_on_open_file` in `app/ui/main_window.py`**
 
   Add these imports to `app/ui/main_window.py`:
   ```python
@@ -2868,7 +2868,7 @@ class TestIdentityDialog(unittest.TestCase):
 
   > **Note:** `QDialog`, `QFileDialog`, and `QMessageBox` are already imported at module level in Step 8.4's imports block, along with `DocumentIdentityDialog`. No further import changes needed here. `SettingsDialog` is imported in Task 10 when `_on_settings` is wired.
 
-- [ ] **Step 8.5: Run tests to confirm they pass**
+- [x] **Step 8.5: Run tests to confirm they pass**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -2876,7 +2876,7 @@ class TestIdentityDialog(unittest.TestCase):
   ```
   Expected: All 8 tests pass.
 
-- [ ] **Step 8.6: Run full suite to check for regressions**
+- [x] **Step 8.6: Run full suite to check for regressions**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -2884,7 +2884,7 @@ class TestIdentityDialog(unittest.TestCase):
   ```
   Expected: All tests pass.
 
-- [ ] **Step 8.7: Commit**
+- [x] **Step 8.7: Commit**
 
   ```pwsh
   git add app/ui/identity_dialog.py app/ui/main_window.py tests/test_ui_main_window.py
@@ -3027,7 +3027,7 @@ class TestSettingsDialogPersistence(unittest.TestCase):
         self.assertEqual(config.stage2_model, "original-model")
 ```
 
-- [ ] **Step 9.2: Run to confirm failure**
+- [x] **Step 9.2: Run to confirm failure**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -3035,7 +3035,7 @@ class TestSettingsDialogPersistence(unittest.TestCase):
   ```
   Expected: `ModuleNotFoundError: No module named 'app.ui.settings_dialog'`
 
-- [ ] **Step 9.3: Create `app/ui/settings_dialog.py`**
+- [x] **Step 9.3: Create `app/ui/settings_dialog.py`**
 
   ```python
   """Settings dialog: edit AppConfig fields with Save/Cancel semantics."""
@@ -3203,7 +3203,7 @@ class TestSettingsDialogPersistence(unittest.TestCase):
           self.reject()
   ```
 
-- [ ] **Step 9.4: Run tests to confirm they pass**
+- [x] **Step 9.4: Run tests to confirm they pass**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -3211,7 +3211,7 @@ class TestSettingsDialogPersistence(unittest.TestCase):
   ```
   Expected: All 12 tests pass.
 
-- [ ] **Step 9.5: Commit**
+- [x] **Step 9.5: Commit**
 
   ```pwsh
   git add app/ui/settings_dialog.py tests/test_ui_settings_dialog.py
@@ -3332,7 +3332,7 @@ class TestSettingsDialogTestKey(unittest.TestCase):
         self.assertIn("invalid_api_key", dlg._test_key_result.text())
 ```
 
-- [ ] **Step 10.2: Run to confirm failure**
+- [x] **Step 10.2: Run to confirm failure**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -3340,7 +3340,7 @@ class TestSettingsDialogTestKey(unittest.TestCase):
   ```
   Expected: Tests fail because credential controls don't exist yet.
 
-- [ ] **Step 10.3: Add credential controls to `app/ui/settings_dialog.py`**
+- [x] **Step 10.3: Add credential controls to `app/ui/settings_dialog.py`**
 
   Add these imports to `settings_dialog.py`:
   ```python
@@ -3532,7 +3532,7 @@ class TestSettingsDialogTestKey(unittest.TestCase):
 
   Add `from PySide6.QtWidgets import QApplication` to the import block.
 
-- [ ] **Step 10.4: Run tests to confirm they pass**
+- [x] **Step 10.4: Run tests to confirm they pass**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -3540,7 +3540,7 @@ class TestSettingsDialogTestKey(unittest.TestCase):
   ```
   Expected: All 22 tests pass.
 
-- [ ] **Step 10.5: Write and run settings action test (confirm failure)**
+- [x] **Step 10.5: Write and run settings action test (confirm failure)**
 
   Add to `tests/test_ui_main_window.py` in `TestMainWindowToolbar`:
 
@@ -3562,7 +3562,7 @@ class TestSettingsDialogTestKey(unittest.TestCase):
   ```
   Expected: Test fails — `_on_settings` is a stub.
 
-- [ ] **Step 10.6: Wire settings action in main window and confirm all tests pass**
+- [x] **Step 10.6: Wire settings action in main window and confirm all tests pass**
 
   Add to `app/ui/main_window.py` module-level imports:
   ```python
@@ -3584,7 +3584,7 @@ class TestSettingsDialogTestKey(unittest.TestCase):
   ```
   Expected: All tests pass.
 
-- [ ] **Step 10.7: Run full test suite**
+- [x] **Step 10.7: Run full test suite**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -3592,7 +3592,7 @@ class TestSettingsDialogTestKey(unittest.TestCase):
   ```
   Expected: All tests pass.
 
-- [ ] **Step 10.8: Commit**
+- [x] **Step 10.8: Commit**
 
   ```pwsh
   git add app/ui/settings_dialog.py app/ui/main_window.py tests/test_ui_settings_dialog.py
@@ -3735,7 +3735,7 @@ class TestMainWindowPanelWiring(unittest.TestCase):
         mock_display.assert_called_once()
 ```
 
-- [ ] **Step 11.2: Run to confirm failure**
+- [x] **Step 11.2: Run to confirm failure**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -3743,7 +3743,7 @@ class TestMainWindowPanelWiring(unittest.TestCase):
   ```
   Expected: Test fails because `_build_central_widget` still uses placeholder labels.
 
-- [ ] **Step 11.3: Replace placeholder panels with real widgets in `app/ui/main_window.py`**
+- [x] **Step 11.3: Replace placeholder panels with real widgets in `app/ui/main_window.py`**
 
   Update `_build_central_widget` to use the real panel classes:
   ```python
@@ -3824,7 +3824,7 @@ class TestMainWindowPanelWiring(unittest.TestCase):
       self._spell_list_panel.refresh(session)
   ```
 
-- [ ] **Step 11.4: Run tests to confirm they pass**
+- [x] **Step 11.4: Run tests to confirm they pass**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -3832,7 +3832,7 @@ class TestMainWindowPanelWiring(unittest.TestCase):
   ```
   Expected: All 6 tests pass.
 
-- [ ] **Step 11.5: Run full test suite**
+- [x] **Step 11.5: Run full test suite**
 
   ```pwsh
   $env:QT_QPA_PLATFORM = "offscreen"
@@ -3840,7 +3840,7 @@ class TestMainWindowPanelWiring(unittest.TestCase):
   ```
   Expected: All tests pass.
 
-- [ ] **Step 11.6: Commit**
+- [x] **Step 11.6: Commit**
 
   ```pwsh
   git add app/ui/main_window.py tests/test_ui_main_window.py
@@ -3851,15 +3851,19 @@ class TestMainWindowPanelWiring(unittest.TestCase):
 
 ## Final Verification
 
-- [ ] **Run the complete test suite one last time**
+- [x] **Run the complete test suite one last time**
 
   ```pwsh
-  $env:QT_QPA_PLATFORM = "offscreen"
-  python -m unittest discover tests/ -v 2>&1 | Select-String -Pattern "OK|FAIL|ERROR"
+$env:QT_QPA_PLATFORM = "offscreen"
+$test_output = python -m unittest discover tests/ -v 2>&1
+$test_exit_code = $LASTEXITCODE
+$test_output | Select-String -Pattern "OK|FAIL|ERROR"
+if ($test_exit_code -ne 0) { exit $test_exit_code }
   ```
   Expected: `OK` — zero failures, zero errors.
+    Evidence (2026-04-28): Output marker `OK (skipped=2)`; command exit code `0`.
 
-- [ ] **Smoke-test the app launches without errors**
+- [x] **Smoke-test the app launches without errors**
 
   Create a minimal `__main__` block at the bottom of `app/ui/main_window.py` (for dev use only):
   ```python
@@ -3880,6 +3884,7 @@ class TestMainWindowPanelWiring(unittest.TestCase):
   python -m app.ui.main_window
   ```
   Expected: Window appears with "SpellScribe" title and disabled toolbar actions (no document loaded).
+    Evidence (2026-04-28): Process stayed running for 5 seconds without crashing, then was terminated to complete the smoke check.
 
 - [ ] **Final commit**
 

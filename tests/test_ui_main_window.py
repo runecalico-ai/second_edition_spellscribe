@@ -2034,6 +2034,78 @@ class TestMainWindowWorkers(unittest.TestCase):
         event.ignore.assert_not_called()
         mock_super_close.assert_called_once_with(event)
 
+    def test_close_event_waits_when_worker_complete_signal_arrives_before_thread_finishes(self):
+        import threading
+
+        win = self._make_window_with_session()
+        cancel_event = threading.Event()
+        thread = MagicMock()
+        thread.isRunning.return_value = True
+        thread.wait.return_value = True
+
+        win._worker_running = True
+        win._active_thread = thread
+        win._active_worker = MagicMock()
+        win._cancel_event = cancel_event
+
+        updated_session = MagicMock()
+        updated_session.records = []
+        updated_session.selected_spell_id = None
+        updated_session.last_open_path = "/tmp/test.pdf"
+
+        # Worker terminal signal can arrive before QThread has emitted finished.
+        win._on_extraction_complete(updated_session)
+
+        event = MagicMock()
+        with patch("app.ui.main_window.QMainWindow.closeEvent") as mock_super_close:
+            win.closeEvent(event)
+
+        thread.quit.assert_called_once_with()
+        thread.wait.assert_called_once_with(2000)
+        event.ignore.assert_not_called()
+        mock_super_close.assert_called_once_with(event)
+
+    def test_actions_stay_blocked_while_active_thread_is_still_running(self):
+        win = self._make_window_with_session()
+        thread = MagicMock()
+        thread.isRunning.return_value = True
+
+        win._worker_running = False
+        win._active_thread = thread
+        win._update_action_states()
+
+        self.assertFalse(win._action_open.isEnabled())
+        self.assertFalse(win._action_detect.isEnabled())
+        self.assertFalse(win._action_extract_selected.isEnabled())
+        self.assertFalse(win._action_extract_all.isEnabled())
+        self.assertFalse(win._action_settings.isEnabled())
+        self.assertTrue(win._action_cancel.isEnabled())
+
+    def test_active_thread_finished_clears_current_active_thread(self):
+        win = self._make_window_with_session()
+        thread = MagicMock()
+        thread.isRunning.return_value = False
+
+        win._active_thread = thread
+
+        win._on_active_thread_finished(thread)
+
+        self.assertIsNone(win._active_thread)
+
+    def test_stale_finished_callback_does_not_clear_new_active_thread(self):
+        win = self._make_window_with_session()
+        old_thread = MagicMock()
+        new_thread = MagicMock()
+        new_thread.isRunning.return_value = False
+
+        win._active_thread = new_thread
+
+        with patch.object(win, "_update_action_states") as mock_update:
+            win._on_active_thread_finished(old_thread)
+
+        self.assertIs(win._active_thread, new_thread)
+        mock_update.assert_not_called()
+
     def test_status_bar_updates_on_spells_detected(self):
         win = self._make_window_with_session()
         mock_panel = MagicMock()
@@ -2206,6 +2278,43 @@ class TestMainWindowWorkers(unittest.TestCase):
         updated_session.records = []
         win._on_extraction_complete(updated_session)
         self.assertNotEqual(win._status_bar.currentMessage(), "")
+
+    def test_worker_failed_shows_sanitized_extraction_dialog_message(self):
+        win = self._make_window_with_session()
+        win._worker_running = True
+        win._extract_scope_spell_ids = {"spell-1"}
+
+        raw_message = "RuntimeError: provider timeout while processing spell Fireball"
+
+        with patch("app.ui.main_window.QMessageBox.critical") as mock_critical:
+            win._on_worker_failed("Extraction Failed", raw_message)
+
+        mock_critical.assert_called_once()
+        self.assertFalse(win._worker_running)
+        self.assertEqual(win._extract_scope_spell_ids, set())
+
+        args = mock_critical.call_args.args
+        self.assertEqual(args[0], win)
+        self.assertEqual(args[1], "Extraction Failed")
+        self.assertEqual(
+            args[2],
+            "Spell extraction could not be completed. Please try again.",
+        )
+        self.assertNotIn("RuntimeError", args[2])
+        self.assertNotIn("Fireball", args[2])
+
+    def test_worker_failed_shows_sanitized_fallback_dialog_message(self):
+        win = self._make_window_with_session()
+        raw_message = "ValueError: database connection string invalid"
+
+        with patch("app.ui.main_window.QMessageBox.critical") as mock_critical:
+            win._on_worker_failed("Worker Failed", raw_message)
+
+        mock_critical.assert_called_once()
+        args = mock_critical.call_args.args
+        self.assertEqual(args[1], "Worker Failed")
+        self.assertEqual(args[2], "The operation could not be completed. Please try again.")
+        self.assertNotIn(raw_message, args[2])
 
     def test_no_op_selected_run_reports_zero_extracted(self):
         win = self._make_window_with_session()
