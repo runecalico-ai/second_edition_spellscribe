@@ -19,15 +19,26 @@ The runtime code SHALL import Marker lazily so the Standard build does not bundl
 - **THEN** the runtime code does not force the Marker stack into the package through eager imports
 
 ### Requirement: Frozen runtime configures bundled Tesseract correctly
-The packaged app SHALL configure both the Tesseract executable path and the tessdata root in frozen mode.
+The packaged app SHALL configure both the Tesseract executable path and the tessdata root in frozen mode via centralized logic in `app/paths.py`.
 
 #### Scenario: Frozen runtime sets executable and tessdata paths
 - **WHEN** the app starts in a PyInstaller-frozen environment
-- **THEN** it sets `pytesseract.pytesseract.tesseract_cmd` and `TESSDATA_PREFIX` to the bundled Tesseract paths
+- **THEN** it sets `pytesseract.pytesseract.tesseract_cmd` and `TESSDATA_PREFIX` using the bundled paths resolved in `app/paths.py`
+
+#### Scenario: Custom Tesseract path uses automatic tessdata lookup
+- **WHEN** the user provides a custom Tesseract executable path in Settings
+- **THEN** the system automatically searches for a `tessdata/` folder in the same directory or parent directory to set `TESSDATA_PREFIX`
+
+### Requirement: The app identifies its build flavor at runtime
+The system SHALL use a build-time injected constant to distinguish between Standard and Pro versions.
+
+#### Scenario: Standard build disables Pro-only features
+- **WHEN** the app is running in a Standard build
+- **THEN** the Settings UI hides or disables the "Marker/GPU" OCR option and labels the version as "Standard Edition"
 
 ### Requirement: The project provides a Windows installer
-The system SHALL provide an Inno Setup installer for the packaged app.
+The system SHALL provide a single Inno Setup installer script that supports both Standard and Pro builds via preprocessor defines.
 
 #### Scenario: Installer creates app shortcut
 - **WHEN** the user installs SpellScribe from the generated setup program
-- **THEN** the installer creates the configured Start Menu shortcut
+- **THEN** the installer creates the configured Start Menu shortcut and installs the files for the selected build flavor

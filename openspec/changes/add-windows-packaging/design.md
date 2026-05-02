@@ -36,12 +36,20 @@ Alternative considered:
 - Rejected because runtime imports can still pull in the heavy stack in less obvious ways.
 
 ### Set both `tesseract_cmd` and `TESSDATA_PREFIX` in frozen mode
-- The revised spec explicitly requires both values for stable OCR startup.
 - The app should not depend on system-installed Tesseract when running from the packaged bundle.
+- Path resolution logic for Tesseract and tessdata is centralized in `app/paths.py`.
 
-Alternative considered:
-- Set only the executable path.
-- Rejected because tessdata lookup can still fail in packaged builds.
+### Use explicit build-flavor constants
+- A `BUILD_FLAVOR` constant (Standard vs Pro) is injected at build time.
+- This drives UI labels and feature availability (e.g., "Standard Edition").
+
+### Implement UI-level gating for Pro features
+- The Standard build hides or disables Marker/GPU options in Settings.
+- This prevents "broken" states where a user selects a feature missing from their build.
+
+### Use --onedir PyInstaller format
+- Avoids the slow startup of `--onefile` decompression, especially for the heavy Pro build.
+- The Inno Setup installer provides the single-file setup experience for the user.
 
 ## Risks / Trade-offs
 
