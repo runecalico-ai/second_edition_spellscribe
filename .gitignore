@@ -4,6 +4,13 @@ bootstrap.js
 bootstrap.json
 bootstrap.jsonp
 build/
+!build/
+build/*
+!build/*.ps1
+!build/*.bat
+!build/*.cmd
+!build/*.spec
+!build/*.iss
 classic.json
 classic.jsonp
 ext/

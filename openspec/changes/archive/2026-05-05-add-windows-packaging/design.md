@@ -38,6 +38,7 @@ Alternative considered:
 ### Set both `tesseract_cmd` and `TESSDATA_PREFIX` in frozen mode
 - The app should not depend on system-installed Tesseract when running from the packaged bundle.
 - Path resolution logic for Tesseract and tessdata is centralized in `app/paths.py`.
+- **Build-time Sourcing**: Tesseract binaries are sourced from the system during the build process (using automatic detection in the build script) rather than being stored in the repository.
 
 ### Use explicit build-flavor constants
 - A `BUILD_FLAVOR` constant (Standard vs Pro) is injected at build time.

@@ -1,0 +1,13 @@
+SpellScribe License Notice
+==========================
+
+This installer includes SpellScribe and third-party open-source components.
+This page is a short notice for setup only and does not replace the full
+license text for any included component.
+
+Use, redistribution, and modification are governed by the applicable project
+and dependency licenses provided with the source or distribution materials.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE, AND NONINFRINGEMENT.

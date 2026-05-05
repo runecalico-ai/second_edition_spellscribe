@@ -8,9 +8,20 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+try:
+    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+except ModuleNotFoundError as exc:
+    PYSIDE6_AVAILABLE = False
+    PYSIDE6_SKIP_REASON = "PySide6 is required for UI tests"
+    Qt = None
+    QTimer = None
+    QTest = None
+    QApplication = None
+else:
+    PYSIDE6_AVAILABLE = True
+    PYSIDE6_SKIP_REASON = ""
 
 _app: QApplication | None = None
 
@@ -31,6 +42,7 @@ def _make_config(**overrides):
     return config
 
 
+@unittest.skipUnless(PYSIDE6_AVAILABLE, PYSIDE6_SKIP_REASON)
 class TestSettingsDialogLoading(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -78,12 +90,67 @@ class TestSettingsDialogLoading(unittest.TestCase):
         dlg = self._make_dialog(config)
         self.assertEqual(dlg._field_tesseract.text(), "C:/tesseract/tesseract.exe")
 
+    def test_ocr_backend_combo_pre_filled_tesseract(self):
+        config = _make_config(ocr_backend="tesseract_cpu")
+        with patch("app.ui.settings_dialog.is_pro_build", return_value=True):
+            dlg = self._make_dialog(config)
+        self.assertEqual(dlg._field_ocr_backend.currentData(), "tesseract_cpu")
+
+    def test_ocr_backend_combo_pre_filled_marker_gpu_when_pro(self):
+        config = _make_config(ocr_backend="marker_gpu")
+        with patch("app.ui.settings_dialog.is_pro_build", return_value=True):
+            dlg = self._make_dialog(config)
+        self.assertEqual(dlg._field_ocr_backend.currentData(), "marker_gpu")
+
     def test_default_source_document_pre_filled(self):
         config = _make_config(default_source_document="grimoire.pdf")
         dlg = self._make_dialog(config)
         self.assertEqual(dlg._field_default_source.text(), "grimoire.pdf")
 
+    def test_standard_build_shows_standard_edition_and_disables_marker_note(self):
+        config = _make_config()
+        with patch("app.ui.settings_dialog.edition_label", return_value="Standard Edition"):
+            with patch("app.ui.settings_dialog.is_pro_build", return_value=False):
+                dlg = self._make_dialog(config)
+        self.assertEqual(dlg._edition_label.text(), "Build: Standard Edition")
+        self.assertEqual(dlg._field_ocr_backend.count(), 1)
+        self.assertEqual(dlg._field_ocr_backend.currentText(), "Tesseract OCR (CPU)")
+        self.assertEqual(dlg._field_ocr_backend.itemData(0), "tesseract_cpu")
+        self.assertFalse(dlg._field_ocr_backend.isEnabled())
+        self.assertIn("disabled", dlg._ocr_backend_note.text().lower())
 
+    def test_pro_build_shows_pro_edition_label(self):
+        config = _make_config()
+        with patch("app.ui.settings_dialog.edition_label", return_value="Pro Edition"):
+            with patch("app.ui.settings_dialog.is_pro_build", return_value=True):
+                dlg = self._make_dialog(config)
+        self.assertEqual(dlg._edition_label.text(), "Build: Pro Edition")
+        self.assertEqual(dlg._field_ocr_backend.count(), 2)
+        self.assertTrue(dlg._field_ocr_backend.isEnabled())
+        self.assertEqual(dlg._field_ocr_backend.itemData(0), "tesseract_cpu")
+        self.assertEqual(dlg._field_ocr_backend.itemData(1), "marker_gpu")
+        self.assertEqual(dlg._field_ocr_backend.currentData(), "tesseract_cpu")
+        dlg._field_ocr_backend.setCurrentIndex(1)
+        self.assertEqual(dlg._field_ocr_backend.currentData(), "marker_gpu")
+        self.assertIn("available", dlg._ocr_backend_note.text().lower())
+
+    def test_pro_build_ocr_combo_reflects_saved_marker_preference(self) -> None:
+        config = _make_config(ocr_backend="marker_gpu")
+        with patch("app.ui.settings_dialog.edition_label", return_value="Pro Edition"):
+            with patch("app.ui.settings_dialog.is_pro_build", return_value=True):
+                dlg = self._make_dialog(config)
+        self.assertEqual(dlg._field_ocr_backend.currentData(), "marker_gpu")
+
+    def test_standard_build_forces_tesseract_combo_even_if_config_requests_marker(self) -> None:
+        config = _make_config(ocr_backend="marker_gpu")
+        with patch("app.ui.settings_dialog.edition_label", return_value="Standard Edition"):
+            with patch("app.ui.settings_dialog.is_pro_build", return_value=False):
+                dlg = self._make_dialog(config)
+        self.assertEqual(dlg._field_ocr_backend.count(), 1)
+        self.assertEqual(dlg._field_ocr_backend.currentData(), "tesseract_cpu")
+
+
+@unittest.skipUnless(PYSIDE6_AVAILABLE, PYSIDE6_SKIP_REASON)
 class TestSettingsDialogPersistence(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -163,6 +230,25 @@ class TestSettingsDialogPersistence(unittest.TestCase):
             dlg._on_save()
         self.assertEqual(config.stage1_model, "changed-model")
 
+    def test_save_persists_marker_ocr_backend_in_pro_build(self) -> None:
+        config = _make_config(ocr_backend="tesseract_cpu")
+        with patch("app.config.is_pro_build", return_value=True):
+            with patch("app.ui.settings_dialog.is_pro_build", return_value=True):
+                dlg = self._make_dialog(config)
+                dlg._field_ocr_backend.setCurrentIndex(1)
+                with patch.object(dlg._working_config.__class__, "save"):
+                    dlg._on_save()
+        self.assertEqual(config.ocr_backend, "marker_gpu")
+
+    def test_save_writes_tesseract_only_ocr_backend_in_standard_build(self) -> None:
+        config = _make_config(ocr_backend="tesseract_cpu")
+        with patch("app.config.is_pro_build", return_value=False):
+            with patch("app.ui.settings_dialog.is_pro_build", return_value=False):
+                dlg = self._make_dialog(config)
+                with patch.object(dlg._working_config.__class__, "save"):
+                    dlg._on_save()
+        self.assertEqual(config.ocr_backend, "tesseract_cpu")
+
     def test_save_applies_normalized_default_when_stage1_model_is_whitespace(self):
         from app.config import AppConfig
 
@@ -212,6 +298,16 @@ class TestSettingsDialogPersistence(unittest.TestCase):
         self.assertEqual(config.export_directory, defaults.export_directory)
         self.assertEqual(config.default_source_document, "Tome of Magic")
 
+    def test_standard_save_persists_tesseract_when_config_had_marker_gpu(self):
+        config = _make_config(ocr_backend="marker_gpu")
+        with patch("app.config.is_pro_build", return_value=False):
+            with patch("app.ui.settings_dialog.is_pro_build", return_value=False):
+                dlg = self._make_dialog(config)
+                self.assertEqual(dlg._field_ocr_backend.currentData(), "tesseract_cpu")
+                with patch.object(dlg._working_config.__class__, "save"):
+                    dlg._on_save()
+        self.assertEqual(config.ocr_backend, "tesseract_cpu")
+
     def test_save_exception_keeps_dialog_open_and_preserves_original_config(self):
         config = _make_config(stage1_model="original-model")
         dlg = self._make_dialog(config)
@@ -258,6 +354,7 @@ class TestSettingsDialogPersistence(unittest.TestCase):
         self.assertEqual(config.stage2_model, "original-model")
 
 
+@unittest.skipUnless(PYSIDE6_AVAILABLE, PYSIDE6_SKIP_REASON)
 class TestCredentialControls(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -357,6 +454,7 @@ class TestCredentialControls(unittest.TestCase):
         self.assertTrue(dlg._btn_test_key.isEnabled())
 
 
+@unittest.skipUnless(PYSIDE6_AVAILABLE, PYSIDE6_SKIP_REASON)
 class TestSettingsDialogTestKey(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

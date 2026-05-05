@@ -1,4 +1,8 @@
-## ADDED Requirements
+## Purpose
+
+Define the packaging and installer requirements for shipping Standard and Pro Windows editions of SpellScribe.
+
+## Requirements
 
 ### Requirement: The project provides separate Standard and Pro Windows builds
 The system SHALL provide separate Standard and Pro PyInstaller build configurations.
@@ -37,8 +41,20 @@ The system SHALL use a build-time injected constant to distinguish between Stand
 - **THEN** the Settings UI hides or disables the "Marker/GPU" OCR option and labels the version as "Standard Edition"
 
 ### Requirement: The project provides a Windows installer
-The system SHALL provide a single Inno Setup installer script that supports both Standard and Pro builds via preprocessor defines.
+The system SHALL provide a single Inno Setup installer script that supports both Standard and Pro builds via preprocessor defines. The script relies on Inno Setup **6.3 or newer** (for example `ArchitecturesAllowed=x64compatible`).
+
+#### Scenario: Installer preprocessor uses exact flavor tokens
+- **WHEN** the packaging maintainer compiles `build/installer.iss`
+- **THEN** the `AppFlavor` define passed to Inno Setup SHALL be exactly `Standard` or `Pro` (case-sensitive ISPP comparison), matching the values emitted by `build/build_all.ps1`
 
 #### Scenario: Installer creates app shortcut
 - **WHEN** the user installs SpellScribe from the generated setup program
 - **THEN** the installer creates the configured Start Menu shortcut and installs the files for the selected build flavor
+
+#### Scenario: Installer compilation consumes the PyInstaller onedir output
+- **WHEN** the packaging maintainer compiles `build/installer.iss` for a given flavor
+- **THEN** the Inno `[Files]` source tree for that flavor is the matching `dist/SpellScribe-<Standard|Pro>/` onedir produced by PyInstaller (installer-only workflows must reuse an existing onedir or rebuild it first)
+
+#### Scenario: Standard and Pro installers register as separate products
+- **WHEN** both Standard and Pro installers are produced from the same script using different preprocessor flavors
+- **THEN** each build uses a distinct stable `AppId` and flavor-specific default install directory under 64-bit Program Files so Windows shows separate uninstall entries per edition

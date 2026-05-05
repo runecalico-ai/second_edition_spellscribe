@@ -6,6 +6,7 @@ This note explains how to set up Tesseract for local SpellScribe runs on Windows
 
 1. Download the Windows installer from the UB Mannheim Tesseract build.
 2. Install Tesseract to `C:\Program Files\Tesseract-OCR`.
+   - You can install using winget `winget install --id=tesseract-ocr.tesseract -e`
 3. Keep the English language data during the install.
 4. Make sure `C:\Program Files\Tesseract-OCR\tesseract.exe` exists after the install.
 

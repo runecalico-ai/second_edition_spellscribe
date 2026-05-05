@@ -1,11 +1,19 @@
-anthropic>=0.52,<1
+# anthropic>=0.52,<1 # Restricted as dependency in marker-pdf
 keyring>=25.6,<26
 pydantic>=2.13,<3
 pymupdf>=1.26,<2
 pymupdf4llm>=0.2,<1
 docx2python>=3.6,<4
 jinja2>=3.1,<4
-pillow>=11,<12
+# pillow>=11,<12 # Restricted as dependency in marker-pdf
+pillow>=10.1.0,<11.0.0
 pytesseract>=0.3.13,<1
 python-docx>=1.2,<2
 PySide6>=6.7,<7
+PyInstaller>=6.0.0,<7
+instructor>=1.0.0.1,<2 # Restricted by shared dependency in marker-pdf
+marker-pdf>=1.10.2,<2
+pytest
+pyright
+pylint
+ruff

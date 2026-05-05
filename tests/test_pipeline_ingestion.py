@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -59,6 +60,61 @@ def _create_test_docx(path: Path) -> None:
 
 
 class IngestionPipelineTests(unittest.TestCase):
+    def test_configure_tesseract_binary_sets_cmd_and_tessdata_prefix(self) -> None:
+        from app.pipeline.ingestion import _configure_tesseract_binary
+
+        class _PyTesseractStub:
+            class _Inner:
+                tesseract_cmd = ""
+
+            pytesseract = _Inner()
+
+        with patch("app.pipeline.ingestion._load_module", return_value=_PyTesseractStub()):
+            with patch(
+                "app.pipeline.ingestion.resolve_tesseract_executable",
+                return_value="C:/Tesseract/tesseract.exe",
+            ):
+                with patch(
+                    "app.pipeline.ingestion.resolve_tessdata_prefix",
+                    return_value="C:/Tesseract/tessdata",
+                ):
+                    with patch.dict(os.environ, {}, clear=True):
+                        _configure_tesseract_binary("")
+                        self.assertEqual(
+                            _PyTesseractStub.pytesseract.tesseract_cmd,
+                            "C:/Tesseract/tesseract.exe",
+                        )
+                        self.assertEqual(
+                            os.environ.get("TESSDATA_PREFIX"),
+                            "C:/Tesseract/tessdata",
+                        )
+
+    def test_configure_tesseract_binary_keeps_env_when_no_tessdata_found(self) -> None:
+        from app.pipeline.ingestion import _configure_tesseract_binary
+
+        class _PyTesseractStub:
+            class _Inner:
+                tesseract_cmd = ""
+
+            pytesseract = _Inner()
+
+        with patch("app.pipeline.ingestion._load_module", return_value=_PyTesseractStub()):
+            with patch(
+                "app.pipeline.ingestion.resolve_tesseract_executable",
+                return_value="",
+            ):
+                with patch(
+                    "app.pipeline.ingestion.resolve_tessdata_prefix",
+                    return_value="",
+                ):
+                    with patch.dict(os.environ, {"TESSDATA_PREFIX": "existing"}, clear=True):
+                        _configure_tesseract_binary("")
+                        self.assertEqual(
+                            _PyTesseractStub.pytesseract.tesseract_cmd,
+                            "",
+                        )
+                        self.assertEqual(os.environ.get("TESSDATA_PREFIX"), "existing")
+
     def test_default_pdf_ratio_reader_reports_non_zero_text_ratio_for_text_pdf(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             pdf_path = Path(tmp_dir) / "digital-ratio.pdf"
