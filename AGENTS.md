@@ -145,7 +145,6 @@ app\build_config.py ← __future__
 app\config.py ← __future__, app
 app\paths.py ← __future__
 app\pipeline\ingestion.py ← __future__, importlib, app
-app\ui\identity_dialog.py ← __future__, PySide6, app
 app\ui\main_window.py ← __future__, PySide6, app, fitz
 app\ui\review_panel.py ← __future__, PySide6, app
 app\ui\settings_dialog.py ← __future__, PySide6, app
@@ -163,6 +162,7 @@ app\pipeline\extraction.py ← __future__, importlib, pydantic, app
 app\pipeline\identity.py ← __future__, app
 app\session.py ← __future__, pydantic, app
 app\ui\document_panel.py ← __future__, PySide6
+app\ui\identity_dialog.py ← __future__, PySide6, app
 app\ui\workers.py ← __future__, PySide6, app
 app\utils\review_notes.py ← __future__
 tests\test_coordinate_aware_text_map.py ← __future__, pydantic, app, unittest
@@ -213,12 +213,6 @@ def ingest_docx_default(source_path: Path) → DOCXIngestionPayload
 def build_pdf_coordinate_map(lines: Sequence[PDFLineFragment]) → CoordinateAwareTextMap
 def build_docx_coordinate_map(lines: Sequence[DOCXLineFragment]) → CoordinateAwareTextMap
 def route_document(source_path: str | Path, *, config: AppConfig, resolve_unknown_identity: UnknownIdentityResolver | None, read_pdf_text_ratios: PDFTextRatioReader | None, ingest_pdf_digital: PDFIngestor | None, ingest_pdf_ocr: PDFIngestor | None, ingest_docx: DOCXIngestor | None) → RoutedDocument
-```
-
-### app\ui\identity_dialog.py
-```
-class DocumentIdentityDialog(QDialog)
-  def get_result() → DocumentIdentityInput
 ```
 
 ### app\ui\main_window.py
@@ -341,6 +335,12 @@ def restore_session_state_for_source(source_sha256_hex: str, *, session_path: st
 class DocumentPanel(QWidget)
   def __init__(parent: QWidget | None) → None
   def show_placeholder() → None
+```
+
+### app\ui\identity_dialog.py
+```
+class DocumentIdentityDialog(QDialog)
+  def get_result() → DocumentIdentityInput
 ```
 
 ### app\ui\workers.py
