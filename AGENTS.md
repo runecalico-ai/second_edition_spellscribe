@@ -141,41 +141,79 @@ Document (PDF/DOCX)
 Always run `sigmap ask` or `sigmap --query` before searching for files relevant to a task.
 ## deps
 ```
+app\build_config.py ← __future__
+app\config.py ← __future__, app
+app\paths.py ← __future__
+app\pipeline\ingestion.py ← __future__, importlib, app
 app\ui\identity_dialog.py ← __future__, PySide6, app
 app\ui\main_window.py ← __future__, PySide6, app, fitz
 app\ui\review_panel.py ← __future__, PySide6, app
 app\ui\settings_dialog.py ← __future__, PySide6, app
 app\ui\spell_list_panel.py ← __future__, PySide6
+tests\test_app_config.py ← __future__, unittest, app
+tests\test_build_config.py ← __future__, unittest, importlib
+tests\test_paths.py ← __future__, unittest, app
+tests\test_pipeline_ingestion.py ← __future__, unittest, docx, app, fitz
 tests\test_ui_main_window.py ← __future__, types, unittest, PySide6, app
 tests\test_ui_settings_dialog.py ← __future__, unittest
-app\build_config.py ← __future__
-app\config.py ← __future__, app
 app\models.py ← __future__, app, pydantic
-app\paths.py ← __future__
 app\pipeline\detector.py ← __future__
 app\pipeline\export.py ← __future__, jinja2, app
 app\pipeline\extraction.py ← __future__, importlib, pydantic, app
 app\pipeline\identity.py ← __future__, app
-app\pipeline\ingestion.py ← __future__, importlib, app
 app\session.py ← __future__, pydantic, app
 app\ui\document_panel.py ← __future__, PySide6
 app\ui\workers.py ← __future__, PySide6, app
 app\utils\review_notes.py ← __future__
-tests\test_app_config.py ← __future__, unittest, app
-tests\test_build_config.py ← __future__, unittest, importlib
 tests\test_coordinate_aware_text_map.py ← __future__, pydantic, app, unittest
 tests\test_extract_cli.py ← __future__, unittest, app, extract_cli
-tests\test_paths.py ← __future__, unittest, app
 tests\test_pipeline_detector.py ← __future__, app, unittest
 tests\test_pipeline_export.py ← __future__, unittest, app
 tests\test_pipeline_extraction.py ← __future__, types, unittest, app, pydantic
-tests\test_pipeline_ingestion.py ← __future__, unittest, docx, app, fitz
 tests\test_review_notes.py ← __future__, app, unittest
 tests\test_session_state.py ← __future__, pydantic, app, unittest
 tests\test_spell_models.py ← __future__, pydantic, app, unittest
 ```
 
 ## app
+
+### app\build_config.py
+```
+def is_pro_build() → bool
+def edition_label() → str
+```
+
+### app\config.py
+```
+@dataclass AppConfig(api_key_storage_mode, api_key, stage1_model, stage2_model, stage2_max_attempts, stage1_empty_page_cutoff, max_concurrent_extractions, confidence_threshold, export_directory, tesseract_path, ocr_backend, default_source_document, last_import_directory, last_export_scope, custom_schools, custom_spheres, document_names_by_sha256, document_offsets, force_ocr_by_sha256)
+def default_config_path() → Path
+```
+
+### app\paths.py
+```
+def spellscribe_data_dir() → Path  # Return the SpellScribe application data directory
+def is_frozen_runtime() → bool  # Return True when running from a frozen PyInstaller bundle
+def frozen_bundle_dir() → Path | None  # Return the active PyInstaller bundle directory when availabl
+def bundled_tesseract_dir() → Path | None  # Return bundled Tesseract directory for frozen builds when pr
+def resolve_tesseract_executable(configured_path: str | Path | None) → str  # Resolve Tesseract executable path from user config or frozen
+def resolve_tessdata_prefix(tesseract_executable: str | Path | None) → str  # Resolve tessdata root from configured executable or frozen b
+```
+
+### app\pipeline\ingestion.py
+```
+@dataclass PDFLineFragment(text, page, bbox)
+@dataclass DOCXLineFragment(text, char_offset)
+@dataclass PDFIngestionPayload(markdown_text, lines)
+@dataclass DOCXIngestionPayload(markdown_text, lines, page_sequence?)
+@dataclass RoutedDocument(source_path, source_sha256_hex, file_type, ingestion_mode, markdown_text, coordinate_map, default_source_pages, identity)
+def read_pdf_text_ratios_default(source_path: Path) → list[float]
+def ingest_pdf_digital_default(source_path: Path) → PDFIngestionPayload
+def ingest_pdf_ocr_default(source_path: Path, *, tesseract_path: str) → PDFIngestionPayload
+def ingest_docx_default(source_path: Path) → DOCXIngestionPayload
+def build_pdf_coordinate_map(lines: Sequence[PDFLineFragment]) → CoordinateAwareTextMap
+def build_docx_coordinate_map(lines: Sequence[DOCXLineFragment]) → CoordinateAwareTextMap
+def route_document(source_path: str | Path, *, config: AppConfig, resolve_unknown_identity: UnknownIdentityResolver | None, read_pdf_text_ratios: PDFTextRatioReader | None, ingest_pdf_digital: PDFIngestor | None, ingest_pdf_ocr: PDFIngestor | None, ingest_docx: DOCXIngestor | None) → RoutedDocument
+```
 
 ### app\ui\identity_dialog.py
 ```
@@ -218,18 +256,6 @@ class SpellListPanel(QWidget)
   def show_placeholder() → None
 ```
 
-### app\build_config.py
-```
-def is_pro_build() → bool
-def edition_label() → str
-```
-
-### app\config.py
-```
-@dataclass AppConfig(api_key_storage_mode, api_key, stage1_model, stage2_model, stage2_max_attempts, stage1_empty_page_cutoff, max_concurrent_extractions, confidence_threshold, export_directory, tesseract_path, ocr_backend, default_source_document, last_import_directory, last_export_scope, custom_schools, custom_spheres, document_names_by_sha256, document_offsets, force_ocr_by_sha256)
-def default_config_path() → Path
-```
-
 ### app\models.py
 ```
 class SpellSchool(str, Enum)
@@ -241,16 +267,6 @@ class Spell(BaseModel) {name*, class_list*, level*, school*, sphere?, range*}
 class LaxSpell(BaseModel) {name?, class_list?, level?, school?, sphere?, range?}
 class TextRegion(BaseModel) {page?, bbox?, char_offset?}
 class CoordinateAwareTextMap(BaseModel) {lines*}
-```
-
-### app\paths.py
-```
-def spellscribe_data_dir() → Path  # Return the SpellScribe application data directory
-def is_frozen_runtime() → bool  # Return True when running from a frozen PyInstaller bundle
-def frozen_bundle_dir() → Path | None  # Return the active PyInstaller bundle directory when availabl
-def bundled_tesseract_dir() → Path | None  # Return bundled Tesseract directory for frozen builds when pr
-def resolve_tesseract_executable(configured_path: str | Path | None) → str  # Resolve Tesseract executable path from user config or frozen
-def resolve_tessdata_prefix(tesseract_executable: str | Path | None) → str  # Resolve tessdata root from configured executable or frozen b
 ```
 
 ### app\pipeline\detector.py
@@ -309,22 +325,6 @@ def lookup_document_identity(config: AppConfig, source_sha256_hex: str) → Docu
 def resolve_document_identity(config: AppConfig, source_sha256_hex: str, *, resolver: UnknownDocumentIdentityResolver | None) → DocumentIdentityMetadata
 ```
 
-### app\pipeline\ingestion.py
-```
-@dataclass PDFLineFragment(text, page, bbox)
-@dataclass DOCXLineFragment(text, char_offset)
-@dataclass PDFIngestionPayload(markdown_text, lines)
-@dataclass DOCXIngestionPayload(markdown_text, lines, page_sequence?)
-@dataclass RoutedDocument(source_path, source_sha256_hex, file_type, ingestion_mode, markdown_text, coordinate_map, default_source_pages, identity)
-def read_pdf_text_ratios_default(source_path: Path) → list[float]
-def ingest_pdf_digital_default(source_path: Path) → PDFIngestionPayload
-def ingest_pdf_ocr_default(source_path: Path, *, tesseract_path: str) → PDFIngestionPayload
-def ingest_docx_default(source_path: Path) → DOCXIngestionPayload
-def build_pdf_coordinate_map(lines: Sequence[PDFLineFragment]) → CoordinateAwareTextMap
-def build_docx_coordinate_map(lines: Sequence[DOCXLineFragment]) → CoordinateAwareTextMap
-def route_document(source_path: str | Path, *, config: AppConfig, resolve_unknown_identity: UnknownIdentityResolver | None, read_pdf_text_ratios: PDFTextRatioReader | None, ingest_pdf_digital: PDFIngestor | None, ingest_pdf_ocr: PDFIngestor | None, ingest_docx: DOCXIngestor | None) → RoutedDocument
-```
-
 ### app\session.py
 ```
 class SpellRecordStatus(str, Enum)
@@ -359,6 +359,63 @@ def strip_alt_tags(review_notes: str | None) → str  # Remove ALT tags and norm
 ```
 
 ## tests
+
+### tests\test_app_config.py
+```
+class AppConfigContractTests(unittest.TestCase)
+  def test_credential_manager_constant_names_are_stable() → None
+class AppConfigNormalizationTests(unittest.TestCase)
+  def test_confidence_threshold_non_finite_values_fall_back_to_default() → None
+  def test_integer_settings_non_finite_values_fall_back_to_defaults() → None
+  def test_force_ocr_invalid_bool_values_are_ignored() → None
+  def test_local_plaintext_api_key_sanitizes_non_string_values() → None
+  def test_document_offsets_reject_non_integral_values() → None
+  def test_stage_models_use_defaults_for_none_non_string_and_blank_values() → None
+  def test_last_export_scope_uses_default_for_blank_values() → None
+  def test_ocr_backend_defaults_to_tesseract_cpu() → None
+class AppConfigPersistenceTests(unittest.TestCase)
+  def test_load_with_non_finite_integer_values_uses_default_fallbacks() → None
+  def test_last_export_scope_round_trips_and_preserves_unknown_values() → None
+  def test_ocr_backend_round_trips_through_save_and_load() → None
+  def test_save_and_load_round_trip_with_explicit_path() → None
+  def test_load_ignores_unknown_keys_and_uses_defaults_for_missing_keys() → None
+  def test_load_returns_normalized_defaults_and_quarantines_when_json_is_malformed() → None
+  def test_save_does_not_corrupt_existing_file_when_write_fails() → None
+  def failing_dump(_obj: object, handle: object, *args: object, **kwargs: object) → None
+```
+
+### tests\test_build_config.py
+```
+class BuildConfigTests(unittest.TestCase)
+  def test_standard_is_default_build_flavor() → None
+  def test_pro_build_flavor_uses_pro_label() → None
+```
+
+### tests\test_paths.py
+```
+class PathResolutionTests(unittest.TestCase)
+  def test_resolve_tesseract_executable_prefers_configured_path() → None
+  def test_resolve_tesseract_executable_falls_back_to_bundled_binary() → None
+  def test_resolve_tessdata_prefix_detects_neighbor_directory() → None
+  def test_resolve_tessdata_prefix_detects_parent_directory() → None
+```
+
+### tests\test_pipeline_ingestion.py
+```
+class IngestionPipelineTests(unittest.TestCase)
+  def test_configure_tesseract_binary_sets_cmd_and_tessdata_prefix() → None
+  def test_configure_tesseract_binary_keeps_env_when_no_tessdata_found() → None
+  def test_default_pdf_ratio_reader_reports_non_zero_text_ratio_for_text_pdf() → None
+  def test_default_digital_pdf_backend_extracts_markdown_and_bounding_boxes() → None
+  def test_default_ocr_pdf_backend_uses_tesseract_line_data() → None
+  def test_default_docx_backend_extracts_markdown_and_character_offsets() → None
+  def test_unsupported_extension_fails_fast_without_side_effects() → None
+  def test_unknown_document_hash_requires_identity_metadata_before_routing() → None
+class CoordinateMapFixtureTests(unittest.TestCase)
+  def test_pdf_coordinate_map_generation_from_fixture() → None
+  def test_pdf_coordinate_map_rejects_non_integral_page_values() → None
+  def test_docx_coordinate_map_generation_from_fixture() → None
+```
 
 ### tests\test_ui_main_window.py
 ```
@@ -418,37 +475,6 @@ class TestCredentialControls(unittest.TestCase)
   def test_save_blocked_in_plaintext_mode_until_confirmed()
 ```
 
-### tests\test_app_config.py
-```
-class AppConfigContractTests(unittest.TestCase)
-  def test_credential_manager_constant_names_are_stable() → None
-class AppConfigNormalizationTests(unittest.TestCase)
-  def test_confidence_threshold_non_finite_values_fall_back_to_default() → None
-  def test_integer_settings_non_finite_values_fall_back_to_defaults() → None
-  def test_force_ocr_invalid_bool_values_are_ignored() → None
-  def test_local_plaintext_api_key_sanitizes_non_string_values() → None
-  def test_document_offsets_reject_non_integral_values() → None
-  def test_stage_models_use_defaults_for_none_non_string_and_blank_values() → None
-  def test_last_export_scope_uses_default_for_blank_values() → None
-  def test_ocr_backend_defaults_to_tesseract_cpu() → None
-class AppConfigPersistenceTests(unittest.TestCase)
-  def test_load_with_non_finite_integer_values_uses_default_fallbacks() → None
-  def test_last_export_scope_round_trips_and_preserves_unknown_values() → None
-  def test_ocr_backend_round_trips_through_save_and_load() → None
-  def test_save_and_load_round_trip_with_explicit_path() → None
-  def test_load_ignores_unknown_keys_and_uses_defaults_for_missing_keys() → None
-  def test_load_returns_normalized_defaults_and_quarantines_when_json_is_malformed() → None
-  def test_save_does_not_corrupt_existing_file_when_write_fails() → None
-  def failing_dump(_obj: object, handle: object, *args: object, **kwargs: object) → None
-```
-
-### tests\test_build_config.py
-```
-class BuildConfigTests(unittest.TestCase)
-  def test_standard_is_default_build_flavor() → None
-  def test_pro_build_flavor_uses_pro_label() → None
-```
-
 ### tests\test_coordinate_aware_text_map.py
 ```
 class TextRegionModelTests(unittest.TestCase)
@@ -476,15 +502,6 @@ class ExtractCliTests(unittest.TestCase)
   def extract_all_fn(state: SessionState, *, config: AppConfig) → SessionState
   def extract_selected_fn(state: SessionState, *, config: AppConfig) → SessionState
   def test_run_extraction_cli_uses_returned_selected_session_state() → None
-```
-
-### tests\test_paths.py
-```
-class PathResolutionTests(unittest.TestCase)
-  def test_resolve_tesseract_executable_prefers_configured_path() → None
-  def test_resolve_tesseract_executable_falls_back_to_bundled_binary() → None
-  def test_resolve_tessdata_prefix_detects_neighbor_directory() → None
-  def test_resolve_tessdata_prefix_detects_parent_directory() → None
 ```
 
 ### tests\test_pipeline_detector.py
@@ -553,23 +570,6 @@ class SequentialDiscoveryTests(unittest.TestCase)
 class APIKeyResolutionTests(unittest.TestCase)
   def test_read_keyring_api_key_returns_empty_string_when_backend_lookup_raises() → None
   def test_detect_spells_carries_heading_forward_and_closes_cross_page_spans() → None
-```
-
-### tests\test_pipeline_ingestion.py
-```
-class IngestionPipelineTests(unittest.TestCase)
-  def test_configure_tesseract_binary_sets_cmd_and_tessdata_prefix() → None
-  def test_configure_tesseract_binary_keeps_env_when_no_tessdata_found() → None
-  def test_default_pdf_ratio_reader_reports_non_zero_text_ratio_for_text_pdf() → None
-  def test_default_digital_pdf_backend_extracts_markdown_and_bounding_boxes() → None
-  def test_default_ocr_pdf_backend_uses_tesseract_line_data() → None
-  def test_default_docx_backend_extracts_markdown_and_character_offsets() → None
-  def test_unsupported_extension_fails_fast_without_side_effects() → None
-  def test_unknown_document_hash_requires_identity_metadata_before_routing() → None
-class CoordinateMapFixtureTests(unittest.TestCase)
-  def test_pdf_coordinate_map_generation_from_fixture() → None
-  def test_pdf_coordinate_map_rejects_non_integral_page_values() → None
-  def test_docx_coordinate_map_generation_from_fixture() → None
 ```
 
 ### tests\test_review_notes.py
