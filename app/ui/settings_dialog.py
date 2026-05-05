@@ -18,6 +18,7 @@ from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.config import CREDENTIAL_ACCOUNT_NAME, CREDENTIAL_SERVICE_NAME
+from app.build_config import edition_label, is_pro_build
 
 if TYPE_CHECKING:
     from app.config import AppConfig
@@ -124,6 +126,10 @@ class SettingsDialog(QDialog):
         scroll.setWidget(form_widget)
         outer.addWidget(scroll)
 
+        self._edition_label = QLabel(f"Build: {edition_label()}", self)
+        self._edition_label.setStyleSheet("font-weight: bold;")
+        form.addRow("Edition:", self._edition_label)
+
         self._field_stage1_model = QLineEdit(self._working_config.stage1_model, self)
         form.addRow("Stage 1 model:", self._field_stage1_model)
 
@@ -149,6 +155,31 @@ class SettingsDialog(QDialog):
 
         self._field_tesseract = QLineEdit(self._working_config.tesseract_path, self)
         form.addRow("Tesseract path:", self._path_row(self._field_tesseract, is_file=True))
+
+        self._field_ocr_backend = QComboBox(self)
+        self._field_ocr_backend.addItem("Tesseract OCR (CPU)", "tesseract_cpu")
+        self._ocr_backend_note = QLabel(self)
+        self._ocr_backend_note.setWordWrap(True)
+        if is_pro_build():
+            self._field_ocr_backend.addItem("Marker OCR (GPU)", "marker_gpu")
+            self._field_ocr_backend.setEnabled(True)
+            self._ocr_backend_note.setText(
+                "Marker OCR (GPU) is available in this build."
+            )
+            self._ocr_backend_note.setStyleSheet("color: #2c3e50;")
+        else:
+            self._field_ocr_backend.setEnabled(False)
+            self._ocr_backend_note.setText(
+                "Marker OCR (GPU) is disabled in Standard Edition."
+            )
+            self._ocr_backend_note.setStyleSheet("color: grey; font-style: italic;")
+        self._sync_ocr_backend_combo_from_working_config()
+        ocr_row = QWidget(self)
+        ocr_layout = QVBoxLayout(ocr_row)
+        ocr_layout.setContentsMargins(0, 0, 0, 0)
+        ocr_layout.addWidget(self._field_ocr_backend)
+        ocr_layout.addWidget(self._ocr_backend_note)
+        form.addRow("OCR backend:", ocr_row)
 
         self._field_export_dir = QLineEdit(self._working_config.export_directory, self)
         form.addRow("Export directory:", self._path_row(self._field_export_dir, is_file=False))
@@ -190,6 +221,17 @@ class SettingsDialog(QDialog):
         path = QFileDialog.getExistingDirectory(self, "Select directory", line_edit.text())
         if path:
             line_edit.setText(path)
+
+    def _sync_ocr_backend_combo_from_working_config(self) -> None:
+        """Select combo entry matching persisted OCR backend (Pro only for Marker)."""
+        desired = self._working_config.ocr_backend
+        if not is_pro_build():
+            self._field_ocr_backend.setCurrentIndex(0)
+            return
+        idx = self._field_ocr_backend.findData(desired)
+        if idx < 0:
+            idx = 0
+        self._field_ocr_backend.setCurrentIndex(idx)
 
     def _build_credential_controls(self, form: QFormLayout) -> None:
         group = QGroupBox("API Key Source", self)
@@ -493,6 +535,13 @@ class SettingsDialog(QDialog):
         self._working_config.max_concurrent_extractions = self._field_max_concurrent.value()
         self._working_config.confidence_threshold = self._field_confidence.value()
         self._working_config.tesseract_path = self._field_tesseract.text().strip()
+        if is_pro_build():
+            raw_backend = self._field_ocr_backend.currentData()
+            if raw_backend not in {"tesseract_cpu", "marker_gpu"}:
+                raw_backend = "tesseract_cpu"
+            self._working_config.ocr_backend = raw_backend  # type: ignore[assignment]
+        else:
+            self._working_config.ocr_backend = "tesseract_cpu"
         self._working_config.export_directory = self._field_export_dir.text().strip()
         self._working_config.default_source_document = self._field_default_source.text().strip()
         if self._rb_env.isChecked():

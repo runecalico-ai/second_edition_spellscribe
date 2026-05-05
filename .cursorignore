@@ -3,7 +3,6 @@
 
 # Build outputs
 dist/
-build/
 target/
 out/
 .next/

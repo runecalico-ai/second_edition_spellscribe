@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import os
 import re
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
@@ -12,6 +13,7 @@ from typing import Any
 
 from app.config import AppConfig
 from app.models import CoordinateAwareTextMap, TextRegion
+from app.paths import resolve_tessdata_prefix, resolve_tesseract_executable
 from app.pipeline.detector import should_route_pdf_to_ocr
 from app.pipeline.identity import (
     DocumentIdentityInput,
@@ -471,12 +473,13 @@ def _split_non_empty_lines(text: str) -> list[str]:
 
 
 def _configure_tesseract_binary(tesseract_path: str) -> None:
-    normalized = tesseract_path.strip()
-    if not normalized:
-        return
-
+    resolved_executable = resolve_tesseract_executable(tesseract_path)
+    resolved_tessdata_prefix = resolve_tessdata_prefix(resolved_executable)
     pytesseract = _load_module("pytesseract")
-    pytesseract.pytesseract.tesseract_cmd = normalized
+    if resolved_executable:
+        pytesseract.pytesseract.tesseract_cmd = resolved_executable
+    if resolved_tessdata_prefix:
+        os.environ["TESSDATA_PREFIX"] = resolved_tessdata_prefix
 
 
 def _render_pdf_page_image(page: Any, *, zoom: float = 2.0) -> Any:

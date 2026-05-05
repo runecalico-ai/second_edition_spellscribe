@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from app.build_config import is_pro_build
 from app.paths import spellscribe_data_dir
 
 
@@ -18,6 +19,9 @@ CREDENTIAL_SERVICE_NAME = "SpellScribe"
 CREDENTIAL_ACCOUNT_NAME = "anthropic_api_key"
 
 APIKeyStorageMode = Literal["env", "credential_manager", "local_plaintext"]
+OCRBackendMode = Literal["tesseract_cpu", "marker_gpu"]
+
+_VALID_OCR_BACKENDS: frozenset[str] = frozenset({"tesseract_cpu", "marker_gpu"})
 
 
 def default_config_path() -> Path:
@@ -72,6 +76,23 @@ def _coerce_non_blank_string(value: Any, default: str) -> str:
     if not value.strip():
         return default
     return value
+
+
+def _coerce_ocr_backend(value: Any, *, default: OCRBackendMode = "tesseract_cpu") -> OCRBackendMode:
+    """Return a valid OCR backend token; unknown values map to CPU Tesseract."""
+    if not isinstance(value, str):
+        return default
+    candidate = value.strip()
+    if candidate in _VALID_OCR_BACKENDS:
+        return cast(OCRBackendMode, candidate)
+    return default
+
+
+def _normalize_ocr_backend_for_build(backend: OCRBackendMode) -> OCRBackendMode:
+    """Standard builds cannot persist or use Marker GPU selection."""
+    if not is_pro_build() and backend == "marker_gpu":
+        return "tesseract_cpu"
+    return backend
 
 
 def _coerce_string_list(value: Any) -> list[str]:
@@ -241,6 +262,7 @@ class AppConfig:
     confidence_threshold: float = 0.85
     export_directory: str = str(Path.home() / "Documents")
     tesseract_path: str = ""
+    ocr_backend: OCRBackendMode = "tesseract_cpu"
     default_source_document: str = "Player's Handbook"
     last_import_directory: str = ""
     last_export_scope: str = "everything_extracted"
@@ -293,6 +315,7 @@ class AppConfig:
                 self.tesseract_path,
                 default="",
             ),
+            ocr_backend=_normalize_ocr_backend_for_build(_coerce_ocr_backend(self.ocr_backend)),
             default_source_document=_coerce_non_blank_string(
                 self.default_source_document,
                 default="Player's Handbook",

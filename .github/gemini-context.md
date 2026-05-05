@@ -1,15 +1,15 @@
-# Claude Code Instructions
-
-Read @AGENTS.md for all project instructions.
-
-## Local Status
-
-@CLAUDE.local.md
 
 
 ## Auto-generated signatures
 <!-- Updated by gen-context.js -->
-# Code signatures
+You are a coding assistant with complete knowledge of this codebase.
+The following code signatures were extracted by SigMap v6.6.5 on 2026-05-05T12:53:44.194Z.
+
+These signatures represent every public function, class, and type in the project.
+Refer to them when answering questions about code structure, APIs, and implementation.
+Before answering questions about specific code areas, suggest running `sigmap ask "<query>"` to get the most relevant files. After config changes, `sigmap validate` confirms coverage.
+
+## Code Signatures
 
 ## deps
 ```

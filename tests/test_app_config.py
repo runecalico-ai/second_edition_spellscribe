@@ -112,6 +112,26 @@ class AppConfigNormalizationTests(unittest.TestCase):
                 config = AppConfig.from_dict({"last_export_scope": raw_value})
                 self.assertEqual(config.last_export_scope, defaults.last_export_scope)
 
+    def test_ocr_backend_defaults_to_tesseract_cpu(self) -> None:
+        self.assertEqual(AppConfig().normalized().ocr_backend, "tesseract_cpu")
+
+    def test_ocr_backend_invalid_values_fall_back_to_tesseract_cpu(self) -> None:
+        for raw_value in (None, 123, "", "   ", "unknown", "TESSERACT_CPU"):
+            with self.subTest(raw_value=raw_value):
+                config = AppConfig.from_dict({"ocr_backend": raw_value})
+                self.assertEqual(config.ocr_backend, "tesseract_cpu")
+
+    def test_ocr_backend_accepts_tesseract_cpu_and_marker_gpu(self) -> None:
+        self.assertEqual(
+            AppConfig.from_dict({"ocr_backend": "tesseract_cpu"}).ocr_backend,
+            "tesseract_cpu",
+        )
+        with patch("app.config.is_pro_build", return_value=True):
+            self.assertEqual(
+                AppConfig.from_dict({"ocr_backend": " marker_gpu "}).ocr_backend,
+                "marker_gpu",
+            )
+
     def test_stage_models_keep_valid_non_empty_string_values(self) -> None:
         config = AppConfig.from_dict(
             {
@@ -153,6 +173,16 @@ class AppConfigNormalizationTests(unittest.TestCase):
         self.assertEqual(config.default_source_document, "Arcana Compendium")
         self.assertEqual(config.last_import_directory, "C:/tmp/imports")
 
+    @patch("app.config.is_pro_build", return_value=True)
+    def test_ocr_backend_marker_gpu_preserved_when_pro_build(self, _mock: object) -> None:
+        config = AppConfig.from_dict({"ocr_backend": "marker_gpu"})
+        self.assertEqual(config.ocr_backend, "marker_gpu")
+
+    @patch("app.config.is_pro_build", return_value=False)
+    def test_ocr_backend_marker_gpu_downgrades_when_standard_build(self, _mock: object) -> None:
+        config = AppConfig.from_dict({"ocr_backend": "marker_gpu"})
+        self.assertEqual(config.ocr_backend, "tesseract_cpu")
+
 
 class AppConfigPersistenceTests(unittest.TestCase):
     def test_load_with_non_finite_integer_values_uses_default_fallbacks(self) -> None:
@@ -184,29 +214,43 @@ class AppConfigPersistenceTests(unittest.TestCase):
 
         self.assertEqual(loaded.last_export_scope, "future_scope")
 
+    def test_ocr_backend_round_trips_through_save_and_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.json"
+            with patch("app.config.is_pro_build", return_value=True):
+                config = AppConfig(ocr_backend="marker_gpu")
+                config.save(config_path)
+                loaded = AppConfig.load(config_path)
+                self.assertEqual(loaded.ocr_backend, "marker_gpu")
+
     def test_save_and_load_round_trip_with_explicit_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_path = Path(tmp_dir) / "explicit-config.json"
-            config = AppConfig(
-                api_key_storage_mode="local_plaintext",
-                api_key="test-api-key",
-                stage1_model="claude-haiku-4-5-latest",
-                stage2_model="claude-sonnet-4-latest",
-                custom_schools=["Runecraft", "  ", "Chronomancy"],
-                custom_spheres=["Starlight", ""],
-                document_names_by_sha256={SHA_A.upper(): " Player's Handbook ", "invalid": "Ignored"},
-                document_offsets={SHA_A.upper(): "12", "invalid": 9},
-                force_ocr_by_sha256={SHA_B.upper(): "yes", SHA_C: True, "bad": False},
-            )
+            with patch("app.config.is_pro_build", return_value=True):
+                config = AppConfig(
+                    api_key_storage_mode="local_plaintext",
+                    api_key="test-api-key",
+                    stage1_model="claude-haiku-4-5-latest",
+                    stage2_model="claude-sonnet-4-latest",
+                    ocr_backend="marker_gpu",
+                    custom_schools=["Runecraft", "  ", "Chronomancy"],
+                    custom_spheres=["Starlight", ""],
+                    document_names_by_sha256={
+                        SHA_A.upper(): " Player's Handbook ",
+                        "invalid": "Ignored",
+                    },
+                    document_offsets={SHA_A.upper(): "12", "invalid": 9},
+                    force_ocr_by_sha256={SHA_B.upper(): "yes", SHA_C: True, "bad": False},
+                )
 
-            destination = config.save(config_path)
-            loaded = AppConfig.load(config_path)
+                destination = config.save(config_path)
+                loaded = AppConfig.load(config_path)
 
-            self.assertEqual(destination, config_path)
-            self.assertEqual(loaded, config.normalized())
-            self.assertEqual(loaded.document_names_by_sha256, {SHA_A: "Player's Handbook"})
-            self.assertEqual(loaded.document_offsets, {SHA_A: 12})
-            self.assertEqual(loaded.force_ocr_by_sha256, {SHA_B: True, SHA_C: True})
+                self.assertEqual(destination, config_path)
+                self.assertEqual(loaded, config.normalized())
+                self.assertEqual(loaded.document_names_by_sha256, {SHA_A: "Player's Handbook"})
+                self.assertEqual(loaded.document_offsets, {SHA_A: 12})
+                self.assertEqual(loaded.force_ocr_by_sha256, {SHA_B: True, SHA_C: True})
 
     def test_load_ignores_unknown_keys_and_uses_defaults_for_missing_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
