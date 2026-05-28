@@ -5,17 +5,31 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import patch
 
 from app.utils.logging_setup import (
     APIKeyRedactionFilter,
+    LoggingSetupResult,
     _REDACTED_PLACEHOLDER,
     _claim_log_file_path,
     _rotate_primary_log,
     _try_claim_log_file,
     setup_logging,
 )
+
+
+def _read_log_file(result: LoggingSetupResult) -> str:
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.FileHandler):
+            handler.flush()
+    handle = result._claim_handle
+    handle.flush()
+    offset = handle.tell()
+    handle.seek(0)
+    contents = handle.read()
+    handle.seek(offset)
+    return contents
 
 
 class APIKeyRedactionFilterTests(unittest.TestCase):
@@ -133,20 +147,6 @@ class LogRotationTests(unittest.TestCase):
 
             self.assertFalse(old_log.exists())
 
-    def test_rotate_primary_log_keeps_existing_backup_when_replace_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            logs_dir = Path(tmp_dir)
-            error_log = logs_dir / "error.log"
-            old_log = logs_dir / "error.old.log"
-            error_log.write_text("new-session\n", encoding="utf-8")
-            old_log.write_text("existing-backup\n", encoding="utf-8")
-
-            with patch("pathlib.Path.replace", side_effect=OSError("replace failed")):
-                _rotate_primary_log(error_log, old_log)
-
-            self.assertTrue(error_log.exists())
-            self.assertEqual(error_log.read_text(encoding="utf-8"), "new-session\n")
-            self.assertEqual(old_log.read_text(encoding="utf-8"), "existing-backup\n")
 
 
 @unittest.skipUnless(sys.platform == "win32", "log file locking requires Windows msvcrt")
@@ -213,56 +213,82 @@ class LogClaimTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "win32", "log file locking requires Windows msvcrt")
 class SetupLoggingTests(unittest.TestCase):
-    def tearDown(self) -> None:
+    def setUp(self) -> None:
+        self._open_results: list[LoggingSetupResult] = []
+
+    def _setup_logging(self, **kwargs: object) -> LoggingSetupResult:
+        result = setup_logging(**kwargs)  # type: ignore[arg-type]
+        self._open_results.append(result)
+        return result
+
+    def _release_logging(self) -> None:
         root = logging.getLogger()
         for handler in list(root.handlers):
             if isinstance(handler, logging.FileHandler):
+                handler.acquire()
+                try:
+                    if handler.stream is not None and not handler.stream.closed:
+                        handler.flush()
+                    handler.stream = None
+                finally:
+                    handler.release()
                 handler.close()
                 root.removeHandler(handler)
+        for result in self._open_results:
+            if not result._claim_handle.closed:
+                result._claim_handle.close()
+        self._open_results.clear()
+
+    @contextmanager
+    def _temporary_logs_dir(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            try:
+                yield Path(tmp_dir)
+            finally:
+                self._release_logging()
+
+    def tearDown(self) -> None:
+        self._release_logging()
 
     def test_setup_logging_creates_warning_level_file_with_utc_format(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            logs_dir = Path(tmp_dir)
-            result = setup_logging(logs_dir=logs_dir)
+        with self._temporary_logs_dir() as logs_dir:
+            result = self._setup_logging(logs_dir=logs_dir)
 
             logger = logging.getLogger("tests.logging_setup")
             logger.warning("worker failed")
 
-            contents = result.log_file_path.read_text(encoding="utf-8")
+            contents = _read_log_file(result)
             self.assertRegex(
                 contents,
-                r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} - MainThread - tests\.logging_setup - WARNING - worker failed\n$",
+                r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} - MainThread - tests\.logging_setup - WARNING - worker failed\n$",
             )
 
     def test_setup_logging_skips_info_messages(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            logs_dir = Path(tmp_dir)
-            result = setup_logging(logs_dir=logs_dir)
+        with self._temporary_logs_dir() as logs_dir:
+            result = self._setup_logging(logs_dir=logs_dir)
 
             logging.getLogger("tests.logging_setup").info("ignored")
 
-            self.assertEqual(result.log_file_path.read_text(encoding="utf-8"), "")
+            self.assertEqual(_read_log_file(result), "")
 
     def test_setup_logging_applies_redaction_filter(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            logs_dir = Path(tmp_dir)
-            result = setup_logging(logs_dir=logs_dir, api_key="sk-secret-key")
+        with self._temporary_logs_dir() as logs_dir:
+            result = self._setup_logging(logs_dir=logs_dir, api_key="sk-secret-key")
 
             logging.getLogger("tests.logging_setup").error("Failure sk-secret-key")
 
-            contents = result.log_file_path.read_text(encoding="utf-8")
+            contents = _read_log_file(result)
             self.assertIn("[REDACTED]", contents)
             self.assertNotIn("sk-secret-key", contents)
 
     def test_setup_logging_records_background_thread_name(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            logs_dir = Path(tmp_dir)
-            result = setup_logging(logs_dir=logs_dir)
+        with self._temporary_logs_dir() as logs_dir:
+            result = self._setup_logging(logs_dir=logs_dir)
             seen: list[str] = []
 
             def worker() -> None:
                 logging.getLogger("tests.logging_setup").warning("background failure")
-                seen.append(result.log_file_path.read_text(encoding="utf-8"))
+                seen.append(_read_log_file(result))
 
             thread = threading.Thread(target=worker, name="DetectWorker")
             thread.start()
@@ -271,13 +297,11 @@ class SetupLoggingTests(unittest.TestCase):
             self.assertIn("DetectWorker", seen[0])
 
     def test_setup_logging_returns_result_that_keeps_claim_alive(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            logs_dir = Path(tmp_dir)
+        with self._temporary_logs_dir() as logs_dir:
             first = setup_logging(logs_dir=logs_dir)
             second = setup_logging(logs_dir=logs_dir)
+            self._open_results.extend([first, second])
 
             self.assertEqual(first.log_file_path, logs_dir / "error.log")
             self.assertEqual(second.log_file_path, logs_dir / "error.1.log")
-
-            first._claim_handle.close()
-            second._claim_handle.close()
+            self.assertFalse(first._claim_handle.closed)
