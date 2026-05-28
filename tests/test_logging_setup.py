@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from app.utils.logging_setup import (
     _claim_log_file_path,
     _rotate_primary_log,
     _try_claim_log_file,
+    setup_logging,
 )
 
 
@@ -207,3 +209,75 @@ class LogClaimTests(unittest.TestCase):
                 self.assertIsNone(second_claim_handle)
             finally:
                 first_claim_handle.close()
+
+
+@unittest.skipUnless(sys.platform == "win32", "log file locking requires Windows msvcrt")
+class SetupLoggingTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        root = logging.getLogger()
+        for handler in list(root.handlers):
+            if isinstance(handler, logging.FileHandler):
+                handler.close()
+                root.removeHandler(handler)
+
+    def test_setup_logging_creates_warning_level_file_with_utc_format(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            logs_dir = Path(tmp_dir)
+            result = setup_logging(logs_dir=logs_dir)
+
+            logger = logging.getLogger("tests.logging_setup")
+            logger.warning("worker failed")
+
+            contents = result.log_file_path.read_text(encoding="utf-8")
+            self.assertRegex(
+                contents,
+                r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} - MainThread - tests\.logging_setup - WARNING - worker failed\n$",
+            )
+
+    def test_setup_logging_skips_info_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            logs_dir = Path(tmp_dir)
+            result = setup_logging(logs_dir=logs_dir)
+
+            logging.getLogger("tests.logging_setup").info("ignored")
+
+            self.assertEqual(result.log_file_path.read_text(encoding="utf-8"), "")
+
+    def test_setup_logging_applies_redaction_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            logs_dir = Path(tmp_dir)
+            result = setup_logging(logs_dir=logs_dir, api_key="sk-secret-key")
+
+            logging.getLogger("tests.logging_setup").error("Failure sk-secret-key")
+
+            contents = result.log_file_path.read_text(encoding="utf-8")
+            self.assertIn("[REDACTED]", contents)
+            self.assertNotIn("sk-secret-key", contents)
+
+    def test_setup_logging_records_background_thread_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            logs_dir = Path(tmp_dir)
+            result = setup_logging(logs_dir=logs_dir)
+            seen: list[str] = []
+
+            def worker() -> None:
+                logging.getLogger("tests.logging_setup").warning("background failure")
+                seen.append(result.log_file_path.read_text(encoding="utf-8"))
+
+            thread = threading.Thread(target=worker, name="DetectWorker")
+            thread.start()
+            thread.join(timeout=5)
+
+            self.assertIn("DetectWorker", seen[0])
+
+    def test_setup_logging_returns_result_that_keeps_claim_alive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            logs_dir = Path(tmp_dir)
+            first = setup_logging(logs_dir=logs_dir)
+            second = setup_logging(logs_dir=logs_dir)
+
+            self.assertEqual(first.log_file_path, logs_dir / "error.log")
+            self.assertEqual(second.log_file_path, logs_dir / "error.1.log")
+
+            first._claim_handle.close()
+            second._claim_handle.close()
