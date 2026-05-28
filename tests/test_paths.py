@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.paths import resolve_tessdata_prefix, resolve_tesseract_executable
+from app.paths import (
+    resolve_tessdata_prefix,
+    resolve_tesseract_executable,
+    spellscribe_data_dir,
+    spellscribe_logs_dir,
+)
 
 
 class PathResolutionTests(unittest.TestCase):
@@ -42,6 +48,17 @@ class PathResolutionTests(unittest.TestCase):
                 resolved = resolve_tesseract_executable(str(missing_configured_path))
             self.assertEqual(resolved, str(bundled_exe))
 
+    def test_resolve_tesseract_executable_ignores_malformed_bundled_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bundled_dir = Path(tmp_dir) / "vendor" / "tesseract"
+            bundled_dir.mkdir(parents=True, exist_ok=True)
+            malformed_exe_dir = bundled_dir / "tesseract.exe"
+            malformed_exe_dir.mkdir(parents=True, exist_ok=True)
+
+            with patch("app.paths.frozen_bundle_dir", return_value=Path(tmp_dir)):
+                resolved = resolve_tesseract_executable("")
+            self.assertEqual(resolved, "")
+
     def test_resolve_tessdata_prefix_detects_neighbor_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             exe = Path(tmp_dir) / "tesseract.exe"
@@ -64,3 +81,31 @@ class PathResolutionTests(unittest.TestCase):
 
             resolved = resolve_tessdata_prefix(str(exe))
             self.assertEqual(resolved, str(tessdata))
+
+    def test_resolve_tessdata_prefix_ignores_malformed_tessdata_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            exe = Path(tmp_dir) / "tesseract.exe"
+            exe.write_text("", encoding="utf-8")
+            malformed_tessdata = Path(tmp_dir) / "tessdata"
+            malformed_tessdata.write_text("not a directory", encoding="utf-8")
+
+            resolved = resolve_tessdata_prefix(str(exe))
+            self.assertEqual(resolved, "")
+
+
+class SpellScribeLogsDirTests(unittest.TestCase):
+    def test_spellscribe_logs_dir_resolves_under_data_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch.dict(os.environ, {"APPDATA": tmp_dir}, clear=False):
+                expected = Path(tmp_dir) / "SpellScribe" / "logs"
+                self.assertEqual(spellscribe_logs_dir(), expected)
+
+    def test_spellscribe_logs_dir_does_not_create_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch.dict(os.environ, {"APPDATA": tmp_dir}, clear=False):
+                logs_dir = spellscribe_logs_dir()
+            self.assertFalse(logs_dir.exists())
+
+    def test_spellscribe_logs_dir_uses_data_dir_helper(self) -> None:
+        with patch("app.paths.spellscribe_data_dir", return_value=Path("C:/fake/SpellScribe")):
+            self.assertEqual(spellscribe_logs_dir(), Path("C:/fake/SpellScribe/logs"))
