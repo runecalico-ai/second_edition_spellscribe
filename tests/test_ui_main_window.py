@@ -157,6 +157,64 @@ class TestMainWindowLoggingHelpers(unittest.TestCase):
             )
         self.assertEqual(resolved, "sk-test-env")
 
+    def test_resolve_api_key_for_redaction_uses_plaintext_config(self) -> None:
+        from app.ui.main_window import _resolve_api_key_for_redaction
+
+        with patch.dict("os.environ", {}, clear=True):
+            resolved = _resolve_api_key_for_redaction(
+                AppConfig(api_key_storage_mode="local_plaintext", api_key="sk-plain")
+            )
+        self.assertEqual(resolved, "sk-plain")
+
+    def test_init_app_logging_returns_cached_result_when_already_initialized(self) -> None:
+        import app.ui.main_window as main_window_module
+        from app.ui.main_window import _init_app_logging
+
+        sentinel = MagicMock()
+        original_setup = main_window_module._app_logging_setup
+        main_window_module._app_logging_setup = sentinel
+        try:
+            with patch("app.ui.main_window.setup_logging") as mock_setup:
+                result = _init_app_logging(
+                    AppConfig(api_key_storage_mode="env", api_key="")
+                )
+            self.assertIs(result, sentinel)
+            mock_setup.assert_not_called()
+        finally:
+            main_window_module._app_logging_setup = original_setup
+
+    def test_sync_logging_redaction_is_noop_when_logging_not_initialized(self) -> None:
+        import app.ui.main_window as main_window_module
+        from app.ui.main_window import _sync_logging_redaction_from_config
+
+        original_setup = main_window_module._app_logging_setup
+        main_window_module._app_logging_setup = None
+        try:
+            _sync_logging_redaction_from_config(
+                AppConfig(api_key_storage_mode="env", api_key="")
+            )
+        finally:
+            main_window_module._app_logging_setup = original_setup
+
+    def test_init_app_logging_returns_none_when_setup_raises(self) -> None:
+        import app.ui.main_window as main_window_module
+        from app.ui.main_window import _init_app_logging
+
+        original_setup = main_window_module._app_logging_setup
+        main_window_module._app_logging_setup = None
+        try:
+            with patch(
+                "app.ui.main_window.setup_logging",
+                side_effect=RuntimeError("claim failed"),
+            ):
+                result = _init_app_logging(
+                    AppConfig(api_key_storage_mode="env", api_key="")
+                )
+            self.assertIsNone(result)
+            self.assertIsNone(main_window_module._app_logging_setup)
+        finally:
+            main_window_module._app_logging_setup = original_setup
+
     @unittest.skipUnless(sys.platform == "win32", "file logging claim requires Windows")
     def test_sync_logging_redaction_updates_filter(self) -> None:
         import logging
@@ -180,7 +238,7 @@ class TestMainWindowLoggingHelpers(unittest.TestCase):
                     )
                 from app.ui.main_window import _app_logging_setup as setup_after
 
-                assert setup_after is not None
+                self.assertIsNotNone(setup_after)
                 self.assertEqual(setup_after.redaction_filter._api_key, "sk-new")
             finally:
                 root = logging.getLogger()
@@ -209,28 +267,44 @@ class TestMainWindowRunGui(unittest.TestCase):
         import app.ui.main_window as main_window_module
 
         config = AppConfig(api_key_storage_mode="env", api_key="")
+        call_order: list[str] = []
+        mock_window = MagicMock()
+
+        def load_config() -> AppConfig:
+            call_order.append("load")
+            return config
+
+        def init_logging(*args: object, **kwargs: object) -> MagicMock:
+            call_order.append("init_logging")
+            return MagicMock()
+
+        def create_window(*args: object, **kwargs: object) -> MagicMock:
+            call_order.append("window")
+            return mock_window
+
         with (
             patch("PySide6.QtWidgets.QApplication") as mock_app_cls,
             patch.object(main_window_module, "AppConfig") as mock_config_cls,
             patch.object(main_window_module, "_init_app_logging") as mock_init_logging,
             patch.object(main_window_module, "SpellScribeMainWindow") as mock_window_cls,
         ):
-            mock_config_cls.load.return_value = config
+            mock_config_cls.load.side_effect = load_config
             mock_app = MagicMock()
             mock_app_cls.return_value = mock_app
             mock_app.exec.return_value = 0
-            mock_init_logging.return_value = MagicMock()
-            mock_window = MagicMock()
-            mock_window_cls.return_value = mock_window
+            mock_init_logging.side_effect = init_logging
+            mock_window_cls.side_effect = create_window
 
             exit_code = main_window_module._run_gui(["spellscribe-test"])
 
             self.assertEqual(exit_code, 0)
+            mock_app_cls.assert_called_once_with(["spellscribe-test"])
             mock_config_cls.load.assert_called_once()
-            mock_init_logging.assert_called_once_with(config)
+            mock_init_logging.assert_called_once_with(config, logs_dir=None)
             mock_window_cls.assert_called_once_with(config=config)
             mock_window.show.assert_called_once()
             mock_app.exec.assert_called_once()
+            self.assertEqual(call_order, ["load", "init_logging", "window"])
 
     def test_run_gui_shows_warning_when_logging_init_fails(self) -> None:
         import app.ui.main_window as main_window_module
@@ -247,11 +321,15 @@ class TestMainWindowRunGui(unittest.TestCase):
             mock_app = MagicMock()
             mock_app_cls.return_value = mock_app
             mock_app.exec.return_value = 0
-            mock_window_cls.return_value = MagicMock()
+            mock_window = MagicMock()
+            mock_window_cls.return_value = mock_window
 
             main_window_module._run_gui(["spellscribe-test"])
 
             mock_msgbox.warning.assert_called_once()
+            mock_window_cls.assert_called_once_with(config=config)
+            mock_window.show.assert_called_once()
+            mock_app.exec.assert_called_once()
 
 
 class TestMainWindowOpenLogsFolder(unittest.TestCase):
@@ -265,29 +343,102 @@ class TestMainWindowOpenLogsFolder(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             logs_dir = Path(tmp_dir) / "logs"
-            logs_dir.mkdir()
             win = SpellScribeMainWindow(config=MagicMock())
             with patch("app.ui.main_window.spellscribe_logs_dir", return_value=logs_dir):
                 win._on_open_logs_folder()
+            self.assertTrue(logs_dir.is_dir())
             mock_startfile.assert_called_once_with(os.fspath(logs_dir))
 
     @patch("app.ui.main_window.os.startfile", side_effect=OSError("access denied"))
     def test_open_logs_folder_shows_error_when_startfile_fails(self, _mock_startfile) -> None:
         from app.ui.main_window import SpellScribeMainWindow
 
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            logs_dir = Path(tmp_dir) / "logs"
+            win = SpellScribeMainWindow(config=MagicMock())
+            with (
+                patch("app.ui.main_window.spellscribe_logs_dir", return_value=logs_dir),
+                patch("app.ui.main_window.QMessageBox.critical") as mock_critical,
+            ):
+                win._on_open_logs_folder()
+            mock_critical.assert_called_once_with(
+                win,
+                "Open Logs Folder",
+                "Could not open the logs folder:\naccess denied",
+            )
+
+    @patch("app.ui.main_window.os.startfile")
+    def test_open_logs_folder_shows_error_when_mkdir_fails(
+        self, mock_startfile
+    ) -> None:
+        from app.ui.main_window import SpellScribeMainWindow
+
+        logs_dir = MagicMock()
+        logs_dir.mkdir.side_effect = PermissionError(13, "Permission denied")
         win = SpellScribeMainWindow(config=MagicMock())
         with (
-            patch("app.ui.main_window.spellscribe_logs_dir", return_value=Path("C:/logs")),
+            patch("app.ui.main_window.spellscribe_logs_dir", return_value=logs_dir),
             patch("app.ui.main_window.QMessageBox.critical") as mock_critical,
         ):
             win._on_open_logs_folder()
+        mock_startfile.assert_not_called()
         mock_critical.assert_called_once()
+        self.assertIn("Permission denied", mock_critical.call_args.args[2])
+
+    def test_open_logs_action_stays_enabled_during_worker(self) -> None:
+        from app.ui.main_window import SpellScribeMainWindow
+
+        win = SpellScribeMainWindow(config=MagicMock())
+        win._worker_running = True
+        win._update_action_states()
+        self.assertTrue(win._action_open_logs.isEnabled())
+
+
+def _release_main_window_test_logging(
+    module: object,
+    *,
+    restore_setup: object | None = None,
+) -> None:
+    import logging
+
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if isinstance(handler, logging.FileHandler):
+            handler.acquire()
+            try:
+                if handler.stream is not None and not handler.stream.closed:
+                    handler.flush()
+                handler.stream = None
+            finally:
+                handler.release()
+            handler.close()
+            root.removeHandler(handler)
+    setup = module._app_logging_setup
+    if setup is not None:
+        claim = setup._claim_handle
+        if not claim.closed:
+            claim.close()
+    module._app_logging_setup = restore_setup
 
 
 class TestMainWindowLoggingSettingsSync(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         _get_app()
+
+    def setUp(self) -> None:
+        from app.ui import main_window as main_window_module
+
+        self._module = main_window_module
+        self._prior_setup = main_window_module._app_logging_setup
+        if main_window_module._app_logging_setup is not None:
+            _release_main_window_test_logging(main_window_module, restore_setup=None)
+
+    def tearDown(self) -> None:
+        _release_main_window_test_logging(
+            self._module,
+            restore_setup=self._prior_setup,
+        )
 
     @patch("app.ui.main_window._sync_logging_redaction_from_config")
     @patch("app.ui.main_window.SettingsDialog")
@@ -323,6 +474,50 @@ class TestMainWindowLoggingSettingsSync(unittest.TestCase):
 
         mock_sync.assert_not_called()
 
+    @unittest.skipUnless(sys.platform == "win32", "file logging claim requires Windows")
+    @patch("app.ui.main_window.SettingsDialog")
+    def test_settings_accepted_updates_live_redaction_filter(
+        self, mock_dlg_cls
+    ) -> None:
+        from app.ui.main_window import SpellScribeMainWindow
+
+        config = AppConfig(
+            api_key_storage_mode="local_plaintext",
+            api_key="sk-old",
+        )
+
+        class _AcceptedSettingsDialog:
+            """Mirrors SettingsDialog._on_save in-place config mutation before accept()."""
+
+            def __init__(self, *, config: AppConfig, parent=None) -> None:
+                self._config = config
+
+            def exec(self) -> int:
+                self._config.api_key = "sk-new"
+                return int(QDialog.DialogCode.Accepted)
+
+        mock_dlg_cls.side_effect = _AcceptedSettingsDialog
+
+        tmp_dir = tempfile.mkdtemp()
+        logs_dir = Path(tmp_dir)
+        try:
+            with patch.dict("os.environ", {}, clear=False):
+                os.environ.pop("ANTHROPIC_API_KEY", None)
+                self._module._init_app_logging(config, logs_dir=logs_dir)
+                setup = self._module._app_logging_setup
+                self.assertIsNotNone(setup)
+                self.assertEqual(setup.redaction_filter._api_key, "sk-old")
+
+                win = SpellScribeMainWindow(config=config)
+                win._on_settings()
+
+                self.assertEqual(setup.redaction_filter._api_key, "sk-new")
+        finally:
+            _release_main_window_test_logging(self._module, restore_setup=None)
+            import shutil
+
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
 
 def _read_active_log_file(result) -> str:
     import logging
@@ -351,29 +546,16 @@ class TestMainWindowWorkerLoggingIntegration(unittest.TestCase):
 
         self._module = main_window_module
         self._prior_setup = main_window_module._app_logging_setup
+        if main_window_module._app_logging_setup is not None:
+            _release_main_window_test_logging(main_window_module, restore_setup=None)
 
     def tearDown(self) -> None:
-        import logging
+        _release_main_window_test_logging(
+            self._module,
+            restore_setup=self._prior_setup,
+        )
 
-        root = logging.getLogger()
-        for handler in list(root.handlers):
-            if isinstance(handler, logging.FileHandler):
-                handler.acquire()
-                try:
-                    if handler.stream is not None and not handler.stream.closed:
-                        handler.flush()
-                    handler.stream = None
-                finally:
-                    handler.release()
-                handler.close()
-                root.removeHandler(handler)
-        if self._module._app_logging_setup is not None:
-            claim = self._module._app_logging_setup._claim_handle
-            if not claim.closed:
-                claim.close()
-        self._module._app_logging_setup = self._prior_setup
-
-    def test_worker_failed_writes_warning_to_claimed_log(self) -> None:
+    def test_worker_failed_writes_error_to_claimed_log(self) -> None:
         tmp_dir = tempfile.mkdtemp()
         logs_dir = Path(tmp_dir)
         try:
@@ -382,6 +564,7 @@ class TestMainWindowWorkerLoggingIntegration(unittest.TestCase):
                 logs_dir=logs_dir,
             )
             self.assertIsNotNone(result)
+            self.assertEqual(result.log_file_path.parent, logs_dir)
 
             win = self._module.SpellScribeMainWindow(config=MagicMock())
             with patch("app.ui.main_window.QMessageBox.critical"):
@@ -390,28 +573,17 @@ class TestMainWindowWorkerLoggingIntegration(unittest.TestCase):
             contents = _read_active_log_file(result)
             self.assertIn("Worker failed", contents)
             self.assertIn("Detect Spells", contents)
+            self.assertIn("network timeout", contents)
             self.assertIn("app.ui.main_window", contents)
+            self.assertRegex(
+                contents,
+                r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} - MainThread - app\.ui\.main_window - ERROR - "
+                r"Worker failed with title='Detect Spells' message='network timeout'\n$",
+            )
         finally:
-            import logging
             import shutil
 
-            root = logging.getLogger()
-            for handler in list(root.handlers):
-                if isinstance(handler, logging.FileHandler):
-                    handler.acquire()
-                    try:
-                        if handler.stream is not None and not handler.stream.closed:
-                            handler.flush()
-                        handler.stream = None
-                    finally:
-                        handler.release()
-                    handler.close()
-                    root.removeHandler(handler)
-            if self._module._app_logging_setup is not None:
-                claim = self._module._app_logging_setup._claim_handle
-                if not claim.closed:
-                    claim.close()
-            self._module._app_logging_setup = self._prior_setup
+            _release_main_window_test_logging(self._module, restore_setup=None)
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
