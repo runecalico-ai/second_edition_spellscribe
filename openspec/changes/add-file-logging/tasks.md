@@ -19,4 +19,4 @@
 - [ ] 3.2 Verify `error.old.log` rotation on restart.
 - [ ] 3.3 Verify multi-instance safe logging (open two apps, check for `error.1.log`).
 - [ ] 3.4 Verify API key redaction in the log file.
-- [ ] 3.5 Verify "Open Logs Folder" menu action opens Explorer.
+- [ ] 3.5 Verify "Open Logs Folder" toolbar action opens Explorer.

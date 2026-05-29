@@ -33,5 +33,5 @@ The application SHALL record detailed diagnostic information while protecting se
 The application SHALL provide a convenient way for users to retrieve log files.
 
 #### Scenario: Open Logs Folder
-- **WHEN** the user selects "Open Logs Folder" from the UI menu
+- **WHEN** the user selects "Open Logs Folder" from the main toolbar
 - **THEN** the system SHALL open the `%APPDATA%\SpellScribe\logs` directory in the default file explorer.

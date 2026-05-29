@@ -23,4 +23,4 @@ We will implement a robust, file-based logging system that captures warnings and
 ## Impact
 - **app/paths.py**: Add support for resolving the `logs` subdirectory.
 - **app/utils/logging_setup.py**: New module for logging configuration and API key redaction filter.
-- **app/ui/main_window.py**: Initialize logging at startup and add a "Help > Open Logs Folder" action.
+- **app/ui/main_window.py**: Initialize logging at startup and add an "Open Logs Folder" toolbar action.
