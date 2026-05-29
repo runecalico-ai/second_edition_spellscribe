@@ -10,7 +10,7 @@
 ## 2. Application Integration
 
 - [ ] 2.1 Initialize logging in the `main_window.py` entry point.
-- [ ] 2.2 Add "Help > Open Logs Folder" menu action to `SpellScribeMainWindow`.
+- [ ] 2.2 Add "Open Logs Folder" toolbar action to `SpellScribeMainWindow`.
 - [ ] 2.3 Pass the current API key from `AppConfig` to the logging filter whenever the config is loaded or updated.
 
 ## 3. Verification
