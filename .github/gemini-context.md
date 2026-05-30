@@ -3,7 +3,7 @@
 ## Auto-generated signatures
 <!-- Updated by gen-context.js -->
 You are a coding assistant with complete knowledge of this codebase.
-The following code signatures were extracted by SigMap v6.6.5 on 2026-05-05T12:53:44.194Z.
+The following code signatures were extracted by SigMap v6.6.5 on 2026-05-30T11:27:52.434Z.
 
 These signatures represent every public function, class, and type in the project.
 Refer to them when answering questions about code structure, APIs, and implementation.
@@ -13,41 +13,60 @@ Before answering questions about specific code areas, suggest running `sigmap as
 
 ## deps
 ```
+app\ui\main_window.py ← __future__, PySide6, app, fitz
+app\utils\logging_setup.py ← __future__, app, msvcrt
+tests\test_logging_setup.py ← __future__, app, unittest
+tests\test_ui_main_window.py ← __future__, types, unittest, app, PySide6
 app\build_config.py ← __future__
 app\config.py ← __future__, app
-app\paths.py ← __future__
-app\pipeline\ingestion.py ← __future__, importlib, app
-app\ui\main_window.py ← __future__, PySide6, app, fitz
-app\ui\review_panel.py ← __future__, PySide6, app
-app\ui\settings_dialog.py ← __future__, PySide6, app
-app\ui\spell_list_panel.py ← __future__, PySide6
-tests\test_app_config.py ← __future__, unittest, app
-tests\test_build_config.py ← __future__, unittest, importlib
-tests\test_paths.py ← __future__, unittest, app
-tests\test_pipeline_ingestion.py ← __future__, unittest, docx, app, fitz
-tests\test_ui_main_window.py ← __future__, types, unittest, PySide6, app
-tests\test_ui_settings_dialog.py ← __future__, unittest
 app\models.py ← __future__, app, pydantic
+app\paths.py ← __future__
 app\pipeline\detector.py ← __future__
 app\pipeline\export.py ← __future__, jinja2, app
 app\pipeline\extraction.py ← __future__, importlib, pydantic, app
 app\pipeline\identity.py ← __future__, app
+app\pipeline\ingestion.py ← __future__, importlib, app
 app\session.py ← __future__, pydantic, app
 app\ui\document_panel.py ← __future__, PySide6
 app\ui\identity_dialog.py ← __future__, PySide6, app
+app\ui\review_panel.py ← __future__, PySide6, app
+app\ui\settings_dialog.py ← __future__, PySide6, app
+app\ui\spell_list_panel.py ← __future__, PySide6
 app\ui\workers.py ← __future__, PySide6, app
 app\utils\review_notes.py ← __future__
+tests\test_app_config.py ← __future__, unittest, app
+tests\test_build_config.py ← __future__, unittest, importlib
 tests\test_coordinate_aware_text_map.py ← __future__, pydantic, app, unittest
 tests\test_extract_cli.py ← __future__, unittest, app, extract_cli
+tests\test_paths.py ← __future__, unittest, app
 tests\test_pipeline_detector.py ← __future__, app, unittest
 tests\test_pipeline_export.py ← __future__, unittest, app
 tests\test_pipeline_extraction.py ← __future__, types, unittest, app, pydantic
+tests\test_pipeline_ingestion.py ← __future__, unittest, docx, app, fitz
 tests\test_review_notes.py ← __future__, app, unittest
 tests\test_session_state.py ← __future__, pydantic, app, unittest
 tests\test_spell_models.py ← __future__, pydantic, app, unittest
+tests\test_ui_settings_dialog.py ← __future__, unittest
 ```
 
 ## app
+
+### app\ui\main_window.py
+```
+class SpellScribeMainWindow(QMainWindow)
+  def __init__(*, config: AppConfig, parent: QWidget | None) → None
+  def closeEvent(event) → None
+```
+
+### app\utils\logging_setup.py
+```
+class APIKeyRedactionFilter(logging.Filter)
+  def __init__(api_key: str | None) → None
+  def set_api_key(api_key: str | None) → None
+  def filter(record: logging.LogRecord) → bool
+@dataclass LoggingSetupResult(log_file_path, redaction_filter, _claim_handle)
+def setup_logging(*, logs_dir: Path | None, api_key: str | None) → LoggingSetupResult  # Configure process-wide file logging for SpellScribe
+```
 
 ### app\build_config.py
 ```
@@ -61,67 +80,6 @@ def edition_label() → str
 def default_config_path() → Path
 ```
 
-### app\paths.py
-```
-def spellscribe_data_dir() → Path  # Return the SpellScribe application data directory
-def is_frozen_runtime() → bool  # Return True when running from a frozen PyInstaller bundle
-def frozen_bundle_dir() → Path | None  # Return the active PyInstaller bundle directory when availabl
-def bundled_tesseract_dir() → Path | None  # Return bundled Tesseract directory for frozen builds when pr
-def resolve_tesseract_executable(configured_path: str | Path | None) → str  # Resolve Tesseract executable path from user config or frozen
-def resolve_tessdata_prefix(tesseract_executable: str | Path | None) → str  # Resolve tessdata root from configured executable or frozen b
-```
-
-### app\pipeline\ingestion.py
-```
-@dataclass PDFLineFragment(text, page, bbox)
-@dataclass DOCXLineFragment(text, char_offset)
-@dataclass PDFIngestionPayload(markdown_text, lines)
-@dataclass DOCXIngestionPayload(markdown_text, lines, page_sequence?)
-@dataclass RoutedDocument(source_path, source_sha256_hex, file_type, ingestion_mode, markdown_text, coordinate_map, default_source_pages, identity)
-def read_pdf_text_ratios_default(source_path: Path) → list[float]
-def ingest_pdf_digital_default(source_path: Path) → PDFIngestionPayload
-def ingest_pdf_ocr_default(source_path: Path, *, tesseract_path: str) → PDFIngestionPayload
-def ingest_docx_default(source_path: Path) → DOCXIngestionPayload
-def build_pdf_coordinate_map(lines: Sequence[PDFLineFragment]) → CoordinateAwareTextMap
-def build_docx_coordinate_map(lines: Sequence[DOCXLineFragment]) → CoordinateAwareTextMap
-def route_document(source_path: str | Path, *, config: AppConfig, resolve_unknown_identity: UnknownIdentityResolver | None, read_pdf_text_ratios: PDFTextRatioReader | None, ingest_pdf_digital: PDFIngestor | None, ingest_pdf_ocr: PDFIngestor | None, ingest_docx: DOCXIngestor | None) → RoutedDocument
-```
-
-### app\ui\main_window.py
-```
-class SpellScribeMainWindow(QMainWindow)
-  def __init__(*, config: AppConfig, parent: QWidget | None) → None
-  def closeEvent(event) → None
-```
-
-### app\ui\review_panel.py
-```
-class ReviewPanel(QWidget)
-  def __init__(*, config: AppConfig, parent: QWidget | None) → None
-  def show_placeholder() → None
-  def show_pending_record(record: SpellRecord) → None
-  def show_review_record(record: SpellRecord, session_state: SessionState) → None
-```
-
-### app\ui\settings_dialog.py
-```
-class _APIKeyTestWorker(QObject)
-  def __init__(*, request_id: int, api_key: str, timeout_seconds: float) → None
-  def run() → None
-class SettingsDialog(QDialog)
-  def __init__(*, config: AppConfig, parent: QWidget | None) → None
-  def done(result: int) → None
-  def reject() → None
-  def close() → bool
-```
-
-### app\ui\spell_list_panel.py
-```
-class SpellListPanel(QWidget)
-  def __init__(parent: QWidget | None) → None
-  def show_placeholder() → None
-```
-
 ### app\models.py
 ```
 class SpellSchool(str, Enum)
@@ -133,6 +91,17 @@ class Spell(BaseModel) {name*, class_list*, level*, school*, sphere?, range*}
 class LaxSpell(BaseModel) {name?, class_list?, level?, school?, sphere?, range?}
 class TextRegion(BaseModel) {page?, bbox?, char_offset?}
 class CoordinateAwareTextMap(BaseModel) {lines*}
+```
+
+### app\paths.py
+```
+def spellscribe_data_dir() → Path  # Return the SpellScribe application data directory
+def spellscribe_logs_dir() → Path  # Return the SpellScribe log directory under the application d
+def is_frozen_runtime() → bool  # Return True when running from a frozen PyInstaller bundle
+def frozen_bundle_dir() → Path | None  # Return the active PyInstaller bundle directory when availabl
+def bundled_tesseract_dir() → Path | None  # Return bundled Tesseract directory for frozen builds when pr
+def resolve_tesseract_executable(configured_path: str | Path | None) → str  # Resolve Tesseract executable path from user config or frozen
+def resolve_tessdata_prefix(tesseract_executable: str | Path | None) → str  # Resolve tessdata root from configured executable or frozen b
 ```
 
 ### app\pipeline\detector.py
@@ -191,6 +160,22 @@ def lookup_document_identity(config: AppConfig, source_sha256_hex: str) → Docu
 def resolve_document_identity(config: AppConfig, source_sha256_hex: str, *, resolver: UnknownDocumentIdentityResolver | None) → DocumentIdentityMetadata
 ```
 
+### app\pipeline\ingestion.py
+```
+@dataclass PDFLineFragment(text, page, bbox)
+@dataclass DOCXLineFragment(text, char_offset)
+@dataclass PDFIngestionPayload(markdown_text, lines)
+@dataclass DOCXIngestionPayload(markdown_text, lines, page_sequence?)
+@dataclass RoutedDocument(source_path, source_sha256_hex, file_type, ingestion_mode, markdown_text, coordinate_map, default_source_pages, identity)
+def read_pdf_text_ratios_default(source_path: Path) → list[float]
+def ingest_pdf_digital_default(source_path: Path) → PDFIngestionPayload
+def ingest_pdf_ocr_default(source_path: Path, *, tesseract_path: str) → PDFIngestionPayload
+def ingest_docx_default(source_path: Path) → DOCXIngestionPayload
+def build_pdf_coordinate_map(lines: Sequence[PDFLineFragment]) → CoordinateAwareTextMap
+def build_docx_coordinate_map(lines: Sequence[DOCXLineFragment]) → CoordinateAwareTextMap
+def route_document(source_path: str | Path, *, config: AppConfig, resolve_unknown_identity: UnknownIdentityResolver | None, read_pdf_text_ratios: PDFTextRatioReader | None, ingest_pdf_digital: PDFIngestor | None, ingest_pdf_ocr: PDFIngestor | None, ingest_docx: DOCXIngestor | None) → RoutedDocument
+```
+
 ### app\session.py
 ```
 class SpellRecordStatus(str, Enum)
@@ -215,6 +200,34 @@ class DocumentIdentityDialog(QDialog)
   def get_result() → DocumentIdentityInput
 ```
 
+### app\ui\review_panel.py
+```
+class ReviewPanel(QWidget)
+  def __init__(*, config: AppConfig, parent: QWidget | None) → None
+  def show_placeholder() → None
+  def show_pending_record(record: SpellRecord) → None
+  def show_review_record(record: SpellRecord, session_state: SessionState) → None
+```
+
+### app\ui\settings_dialog.py
+```
+class _APIKeyTestWorker(QObject)
+  def __init__(*, request_id: int, api_key: str, timeout_seconds: float) → None
+  def run() → None
+class SettingsDialog(QDialog)
+  def __init__(*, config: AppConfig, parent: QWidget | None) → None
+  def done(result: int) → None
+  def reject() → None
+  def close() → bool
+```
+
+### app\ui\spell_list_panel.py
+```
+class SpellListPanel(QWidget)
+  def __init__(parent: QWidget | None) → None
+  def show_placeholder() → None
+```
+
 ### app\ui\workers.py
 ```
 class DetectSpellsWorker(QObject)
@@ -231,6 +244,64 @@ def strip_alt_tags(review_notes: str | None) → str  # Remove ALT tags and norm
 ```
 
 ## tests
+
+### tests\test_logging_setup.py
+```
+class APIKeyRedactionFilterTests(unittest.TestCase)
+  def test_filter_replaces_configured_api_key_in_message() → None
+  def test_filter_replaces_api_key_in_percent_formatted_args() → None
+  def test_filter_leaves_message_unchanged_when_key_is_empty() → None
+  def test_set_api_key_updates_redaction_behavior() → None
+  def test_filter_replaces_api_key_in_exception_traceback_text() → None
+class LogRotationTests(unittest.TestCase)
+  def test_rotate_primary_log_moves_error_log_to_old_log() → None
+  def test_rotate_primary_log_is_noop_when_error_log_missing() → None
+class LogClaimTests(unittest.TestCase)
+  def test_claim_log_file_path_returns_primary_when_available() → None
+  def test_claim_log_file_path_uses_numbered_suffix_when_primary_locked() → None
+  def test_claim_log_file_path_rotates_primary_before_claiming() → None
+  def test_try_claim_log_file_stays_exclusive_after_file_growth() → None
+class SetupLoggingTests(unittest.TestCase)
+  def setUp() → None
+  def tearDown() → None
+  def test_setup_logging_creates_warning_level_file_with_utc_format() → None
+  def test_setup_logging_skips_info_messages() → None
+  def test_setup_logging_applies_redaction_filter() → None
+  def test_setup_logging_records_background_thread_name() → None
+  def worker() → None
+  def test_setup_logging_returns_result_that_keeps_claim_alive() → None
+class LogRestartRotationTests(unittest.TestCase)
+  def test_setup_logging_rotates_primary_log_across_process_restart() → None
+```
+
+### tests\test_ui_main_window.py
+```
+@dataclass _SpellListFixtureSpell(name)
+@dataclass _SpellListFixtureRecord(spell_id, status, canonical_spell, draft_spell, section_order)
+@dataclass _SpellListFixtureSession(records, selected_spell_id?)
+class TestMainWindowToolbar(unittest.TestCase)
+  def setUpClass() → None
+  def test_window_title_shows_spellscribe_with_no_session()
+  def test_toolbar_has_expected_actions()
+  def test_extraction_actions_disabled_before_document_open()
+  def test_open_action_always_enabled()
+  def test_export_action_disabled_with_tooltip()
+  def test_extraction_actions_enabled_after_session_loaded()
+  def test_window_title_updates_after_session_loaded()
+class TestMainWindowLoggingHelpers(unittest.TestCase)
+  def test_resolve_api_key_for_redaction_returns_empty_when_unconfigured() → None
+  def test_resolve_api_key_for_redaction_uses_env_var() → None
+  def test_resolve_api_key_for_redaction_uses_plaintext_config() → None
+  def test_init_app_logging_returns_cached_result_when_already_initialized() → None
+  def test_sync_logging_redaction_is_noop_when_logging_not_initialized() → None
+  def test_init_app_logging_returns_none_when_setup_raises() → None
+  def test_sync_logging_redaction_updates_filter() → None
+class TestMainWindowRunGui(unittest.TestCase)
+  def test_run_gui_initializes_logging_before_window() → None
+  def load_config() → AppConfig
+  def init_logging(*args: object, **kwargs: object) → MagicMock
+  def create_window(*args: object, **kwargs: object) → MagicMock
+```
 
 ### tests\test_app_config.py
 ```
@@ -263,90 +334,6 @@ class BuildConfigTests(unittest.TestCase)
   def test_pro_build_flavor_uses_pro_label() → None
 ```
 
-### tests\test_paths.py
-```
-class PathResolutionTests(unittest.TestCase)
-  def test_resolve_tesseract_executable_prefers_configured_path() → None
-  def test_resolve_tesseract_executable_falls_back_to_bundled_binary() → None
-  def test_resolve_tessdata_prefix_detects_neighbor_directory() → None
-  def test_resolve_tessdata_prefix_detects_parent_directory() → None
-```
-
-### tests\test_pipeline_ingestion.py
-```
-class IngestionPipelineTests(unittest.TestCase)
-  def test_configure_tesseract_binary_sets_cmd_and_tessdata_prefix() → None
-  def test_configure_tesseract_binary_keeps_env_when_no_tessdata_found() → None
-  def test_default_pdf_ratio_reader_reports_non_zero_text_ratio_for_text_pdf() → None
-  def test_default_digital_pdf_backend_extracts_markdown_and_bounding_boxes() → None
-  def test_default_ocr_pdf_backend_uses_tesseract_line_data() → None
-  def test_default_docx_backend_extracts_markdown_and_character_offsets() → None
-  def test_unsupported_extension_fails_fast_without_side_effects() → None
-  def test_unknown_document_hash_requires_identity_metadata_before_routing() → None
-class CoordinateMapFixtureTests(unittest.TestCase)
-  def test_pdf_coordinate_map_generation_from_fixture() → None
-  def test_pdf_coordinate_map_rejects_non_integral_page_values() → None
-  def test_docx_coordinate_map_generation_from_fixture() → None
-```
-
-### tests\test_ui_main_window.py
-```
-@dataclass _SpellListFixtureSpell(name)
-@dataclass _SpellListFixtureRecord(spell_id, status, canonical_spell, draft_spell, section_order)
-@dataclass _SpellListFixtureSession(records, selected_spell_id?)
-class TestMainWindowToolbar(unittest.TestCase)
-  def setUpClass() → None
-  def test_window_title_shows_spellscribe_with_no_session()
-  def test_toolbar_has_expected_actions()
-  def test_extraction_actions_disabled_before_document_open()
-  def test_open_action_always_enabled()
-  def test_export_action_disabled_with_tooltip()
-  def test_extraction_actions_enabled_after_session_loaded()
-  def test_window_title_updates_after_session_loaded()
-class TestDocumentPanel(unittest.TestCase)
-  def setUpClass() → None
-  def test_panel_shows_placeholder_by_default()
-  def test_show_placeholder_hides_viewer()
-  def test_display_docx_shows_text()
-  def test_display_docx_with_highlight_ranges()
-  def test_display_pdf_page_with_no_highlights()
-  def test_display_pdf_page_with_highlights_calls_get_pixmap_and_does_not_raise()
-class TestSpellListPanel(unittest.TestCase)
-  def setUpClass() → None
-  def test_panel_starts_empty()
-  def test_placeholder_message_visible_before_first_refresh()
-  def test_placeholder_hides_after_session_refresh()
-```
-
-### tests\test_ui_settings_dialog.py
-```
-class TestSettingsDialogLoading(unittest.TestCase)
-  def setUpClass() → None
-  def test_stage1_model_field_pre_filled()
-  def test_stage2_model_field_pre_filled()
-  def test_confidence_threshold_field_pre_filled()
-  def test_stage1_empty_page_cutoff_pre_filled()
-  def test_max_concurrent_extractions_pre_filled()
-  def test_export_directory_pre_filled()
-  def test_tesseract_path_pre_filled()
-class TestSettingsDialogPersistence(unittest.TestCase)
-  def setUpClass() → None
-  def test_save_writes_config_to_disk()
-  def test_save_in_env_mode_clears_api_key()
-  def test_save_in_credential_manager_mode_clears_api_key()
-  def test_save_in_local_plaintext_mode_persists_api_key_text()
-  def test_direct_on_save_in_plaintext_mode_without_confirmation_is_blocked()
-  def test_save_updates_stage1_model()
-  def test_save_persists_marker_ocr_backend_in_pro_build() → None
-class TestCredentialControls(unittest.TestCase)
-  def setUpClass() → None
-  def test_env_mode_hides_key_field_shows_note()
-  def test_credential_manager_mode_hides_key_field()
-  def test_local_plaintext_mode_shows_key_field_and_warning()
-  def test_local_plaintext_mode_shows_confirmation_checkbox()
-  def test_save_blocked_in_plaintext_mode_until_confirmed()
-```
-
 ### tests\test_coordinate_aware_text_map.py
 ```
 class TextRegionModelTests(unittest.TestCase)
@@ -374,6 +361,21 @@ class ExtractCliTests(unittest.TestCase)
   def extract_all_fn(state: SessionState, *, config: AppConfig) → SessionState
   def extract_selected_fn(state: SessionState, *, config: AppConfig) → SessionState
   def test_run_extraction_cli_uses_returned_selected_session_state() → None
+```
+
+### tests\test_paths.py
+```
+class PathResolutionTests(unittest.TestCase)
+  def test_resolve_tesseract_executable_prefers_configured_path() → None
+  def test_resolve_tesseract_executable_falls_back_to_bundled_binary() → None
+  def test_resolve_tesseract_executable_ignores_malformed_bundled_directory() → None
+  def test_resolve_tessdata_prefix_detects_neighbor_directory() → None
+  def test_resolve_tessdata_prefix_detects_parent_directory() → None
+  def test_resolve_tessdata_prefix_ignores_malformed_tessdata_file() → None
+class SpellScribeLogsDirTests(unittest.TestCase)
+  def test_spellscribe_logs_dir_resolves_under_data_dir() → None
+  def test_spellscribe_logs_dir_does_not_create_directory() → None
+  def test_spellscribe_logs_dir_uses_data_dir_helper() → None
 ```
 
 ### tests\test_pipeline_detector.py
@@ -444,6 +446,23 @@ class APIKeyResolutionTests(unittest.TestCase)
   def test_detect_spells_carries_heading_forward_and_closes_cross_page_spans() → None
 ```
 
+### tests\test_pipeline_ingestion.py
+```
+class IngestionPipelineTests(unittest.TestCase)
+  def test_configure_tesseract_binary_sets_cmd_and_tessdata_prefix() → None
+  def test_configure_tesseract_binary_keeps_env_when_no_tessdata_found() → None
+  def test_default_pdf_ratio_reader_reports_non_zero_text_ratio_for_text_pdf() → None
+  def test_default_digital_pdf_backend_extracts_markdown_and_bounding_boxes() → None
+  def test_default_ocr_pdf_backend_uses_tesseract_line_data() → None
+  def test_default_docx_backend_extracts_markdown_and_character_offsets() → None
+  def test_unsupported_extension_fails_fast_without_side_effects() → None
+  def test_unknown_document_hash_requires_identity_metadata_before_routing() → None
+class CoordinateMapFixtureTests(unittest.TestCase)
+  def test_pdf_coordinate_map_generation_from_fixture() → None
+  def test_pdf_coordinate_map_rejects_non_integral_page_values() → None
+  def test_docx_coordinate_map_generation_from_fixture() → None
+```
+
 ### tests\test_review_notes.py
 ```
 class ReviewNotesHelperTests(unittest.TestCase)
@@ -491,4 +510,33 @@ class SpellModelValidationTests(unittest.TestCase)
   def test_custom_school_and_sphere_context_do_not_mark_review() → None
   def test_wizard_spell_rejects_non_null_sphere() → None
   def test_unknown_school_appends_note_when_existing_note_is_none_or_empty() → None
+```
+
+### tests\test_ui_settings_dialog.py
+```
+class TestSettingsDialogLoading(unittest.TestCase)
+  def setUpClass() → None
+  def test_stage1_model_field_pre_filled()
+  def test_stage2_model_field_pre_filled()
+  def test_confidence_threshold_field_pre_filled()
+  def test_stage1_empty_page_cutoff_pre_filled()
+  def test_max_concurrent_extractions_pre_filled()
+  def test_export_directory_pre_filled()
+  def test_tesseract_path_pre_filled()
+class TestSettingsDialogPersistence(unittest.TestCase)
+  def setUpClass() → None
+  def test_save_writes_config_to_disk()
+  def test_save_in_env_mode_clears_api_key()
+  def test_save_in_credential_manager_mode_clears_api_key()
+  def test_save_in_local_plaintext_mode_persists_api_key_text()
+  def test_direct_on_save_in_plaintext_mode_without_confirmation_is_blocked()
+  def test_save_updates_stage1_model()
+  def test_save_persists_marker_ocr_backend_in_pro_build() → None
+class TestCredentialControls(unittest.TestCase)
+  def setUpClass() → None
+  def test_env_mode_hides_key_field_shows_note()
+  def test_credential_manager_mode_hides_key_field()
+  def test_local_plaintext_mode_shows_key_field_and_warning()
+  def test_local_plaintext_mode_shows_confirmation_checkbox()
+  def test_save_blocked_in_plaintext_mode_until_confirmed()
 ```

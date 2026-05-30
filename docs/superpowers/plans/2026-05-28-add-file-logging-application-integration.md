@@ -57,7 +57,7 @@
 **Files:**
 - Modify: `app/ui/main_window.py` (imports + module-level state + helpers, before `SpellScribeMainWindow`)
 
-- [ ] **Step 1: Write the failing helper tests**
+- [x] **Step 1: Write the failing helper tests**
 
 Add to `tests/test_ui_main_window.py`:
 
@@ -107,13 +107,13 @@ class TestMainWindowLoggingHelpers(unittest.TestCase):
               SetupLoggingTests()._release_logging()
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `python -m unittest tests.test_ui_main_window.TestMainWindowLoggingHelpers -v`
 
 Expected: FAIL with `ImportError` / `AttributeError` for `_resolve_api_key_for_redaction`.
 
-- [ ] **Step 3: Implement helpers in `main_window.py`**
+- [x] **Step 3: Implement helpers in `main_window.py`**
 
 Add imports near top of `app/ui/main_window.py`:
 
@@ -167,13 +167,13 @@ def _sync_logging_redaction_from_config(config: AppConfig) -> None:
     )
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m unittest tests.test_ui_main_window.TestMainWindowLoggingHelpers -v`
 
 Expected: PASS (Windows required for `_init_app_logging` path; skip or run on win32 only — add `@unittest.skipUnless(sys.platform == "win32", ...)` to the sync test if needed).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit** *(bulk commit `c558919`; review hardening uncommitted)*
 
 ```bash
 git add app/ui/main_window.py tests/test_ui_main_window.py
@@ -187,7 +187,7 @@ git commit -m "feat(ui): add file-logging helpers for main window integration"
 **Files:**
 - Modify: `app/ui/main_window.py` (new `_run_gui()`, thin `__main__` block)
 
-- [ ] **Step 1: Write the failing `_run_gui` test**
+- [x] **Step 1: Write the failing `_run_gui` test**
 
 Add to `tests/test_ui_main_window.py`:
 
@@ -242,13 +242,13 @@ class TestMainWindowRunGui(unittest.TestCase):
             mock_msgbox.warning.assert_called_once()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m unittest tests.test_ui_main_window.TestMainWindowRunGui -v`
 
 Expected: FAIL — `AttributeError: module has no attribute '_run_gui'`.
 
-- [ ] **Step 3: Add `_run_gui()` and thin `__main__`**
+- [x] **Step 3: Add `_run_gui()` and thin `__main__`**
 
 Add before `if __name__ == "__main__":` in `app/ui/main_window.py`:
 
@@ -283,13 +283,13 @@ if __name__ == "__main__":
     sys.exit(_run_gui())
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `python -m unittest tests.test_ui_main_window.TestMainWindowRunGui -v`
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit** *(bulk commit `c558919`; review hardening uncommitted)*
 
 ```bash
 git add app/ui/main_window.py tests/test_ui_main_window.py
@@ -304,7 +304,7 @@ git commit -m "feat(ui): initialize file logging at GUI startup"
 - Modify: `app/ui/main_window.py` (`_build_toolbar`, new `_on_open_logs_folder`)
 - Modify: `tests/test_ui_main_window.py`
 
-- [ ] **Step 1: Write the failing toolbar and handler tests**
+- [x] **Step 1: Write the failing toolbar and handler tests**
 
 Update `test_toolbar_has_expected_actions` expected tuple to include `"Open Logs Folder"`.
 
@@ -345,13 +345,13 @@ class TestMainWindowOpenLogsFolder(unittest.TestCase):
         mock_critical.assert_called_once()
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `python -m unittest tests.test_ui_main_window.TestMainWindowOpenLogsFolder tests.test_ui_main_window.TestMainWindowToolbar.test_toolbar_has_expected_actions -v`
 
 Expected: FAIL — missing action / missing method.
 
-- [ ] **Step 3: Implement toolbar action**
+- [x] **Step 3: Implement toolbar action**
 
 In `_build_toolbar`, after Settings action (lines ~100–101):
 
@@ -383,13 +383,13 @@ Add handler on `SpellScribeMainWindow`:
 
 Do **not** add `_action_open_logs` to `_update_action_states` — it stays enabled always.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m unittest tests.test_ui_main_window.TestMainWindowOpenLogsFolder tests.test_ui_main_window.TestMainWindowToolbar -v`
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit** *(bulk commit `c558919`; review hardening uncommitted)*
 
 ```bash
 git add app/ui/main_window.py tests/test_ui_main_window.py
@@ -404,7 +404,7 @@ git commit -m "feat(ui): add Open Logs Folder toolbar action"
 - Modify: `app/ui/main_window.py` (`_on_settings`)
 - Modify: `tests/test_ui_main_window.py`
 
-- [ ] **Step 1: Write the failing settings-sync test**
+- [x] **Step 1: Write the failing settings-sync test**
 
 ```python
 class TestMainWindowLoggingSettingsSync(unittest.TestCase):
@@ -447,13 +447,13 @@ class TestMainWindowLoggingSettingsSync(unittest.TestCase):
         mock_sync.assert_not_called()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m unittest tests.test_ui_main_window.TestMainWindowLoggingSettingsSync -v`
 
 Expected: FAIL — `_sync_logging_redaction_from_config` not called.
 
-- [ ] **Step 3: Update `_on_settings`**
+- [x] **Step 3: Update `_on_settings`**
 
 ```python
     def _on_settings(self) -> None:
@@ -462,13 +462,13 @@ Expected: FAIL — `_sync_logging_redaction_from_config` not called.
             _sync_logging_redaction_from_config(self._config)
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `python -m unittest tests.test_ui_main_window.TestMainWindowLoggingSettingsSync -v`
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit** *(implementation + integration test verified; commit deferred per user request)*
 
 ```bash
 git add app/ui/main_window.py tests/test_ui_main_window.py
@@ -482,7 +482,7 @@ git commit -m "feat(ui): refresh log redaction key after settings save"
 **Files:**
 - Modify: `tests/test_ui_main_window.py`
 
-- [ ] **Step 1: Write the failing integration test**
+- [x] **Step 1: Write the failing integration test**
 
 Reuse read pattern from `tests/test_logging_setup.py`:
 
@@ -538,15 +538,15 @@ class TestMainWindowWorkerLoggingIntegration(unittest.TestCase):
             self.assertIn("app.ui.main_window", contents)
 ```
 
-- [ ] **Step 2: Run test to verify it fails (if logging not wired) or passes (if already wired)**
+- [x] **Step 2: Run test to verify it fails (if logging not wired) or passes (if already wired)**
 
 Run: `python -m unittest tests.test_ui_main_window.TestMainWindowWorkerLoggingIntegration -v`
 
 Expected before Task 1–2 complete: FAIL (empty log). After startup wiring: PASS.
 
-- [ ] **Step 3: No production code change if Task 1–2 already landed** — this test validates existing `_LOGGER.error` path.
+- [x] **Step 3: No production code change if Task 1–2 already landed** — this test validates existing `_LOGGER.error` path.
 
-- [ ] **Step 4: Run full targeted suite**
+- [x] **Step 4: Run full targeted suite**
 
 Run:
 
@@ -556,13 +556,13 @@ python -m unittest tests.test_ui_main_window.TestMainWindowLoggingHelpers tests.
 
 Expected: all PASS on Windows.
 
-- [ ] **Step 5: Run full test suite**
+- [x] **Step 5: Run full test suite**
 
 Run: `python -m unittest discover tests/ -v`
 
 Expected: PASS (no regressions).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit** *(implementation verified; commit deferred per user request)*
 
 ```bash
 git add tests/test_ui_main_window.py
@@ -576,7 +576,7 @@ git commit -m "test(ui): cover worker errors writing to file log"
 **Files:**
 - Modify: `openspec/changes/add-file-logging/tasks.md`
 
-- [ ] **Step 1: Update task 2.2 text**
+- [x] **Step 1: Update task 2.2 text** *(already toolbar wording in `openspec/changes/add-file-logging/tasks.md`)*
 
 Change:
 `- [ ] 2.2 Add "Help > Open Logs Folder" menu action to SpellScribeMainWindow.`
@@ -584,7 +584,7 @@ Change:
 To:
 `- [ ] 2.2 Add "Open Logs Folder" toolbar action to SpellScribeMainWindow.`
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit** *(3.5 wording aligned; commit deferred per user request)*
 
 ```bash
 git add openspec/changes/add-file-logging/tasks.md
