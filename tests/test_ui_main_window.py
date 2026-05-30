@@ -586,6 +586,36 @@ class TestMainWindowWorkerLoggingIntegration(unittest.TestCase):
             _release_main_window_test_logging(self._module, restore_setup=None)
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def test_worker_failed_redacts_api_key_in_log_file(self) -> None:
+        tmp_dir = tempfile.mkdtemp()
+        logs_dir = Path(tmp_dir)
+        secret = "sk-test-redact-worker"
+        try:
+            with patch.dict("os.environ", {}, clear=False):
+                os.environ.pop("ANTHROPIC_API_KEY", None)
+                config = AppConfig(
+                    api_key_storage_mode="local_plaintext",
+                    api_key=secret,
+                )
+                result = self._module._init_app_logging(config, logs_dir=logs_dir)
+                self.assertIsNotNone(result)
+
+                win = self._module.SpellScribeMainWindow(config=MagicMock())
+                with patch("app.ui.main_window.QMessageBox.critical"):
+                    win._on_worker_failed(
+                        "Detect Spells",
+                        f"Authentication failed for key {secret}",
+                    )
+
+                contents = _read_active_log_file(result)
+                self.assertIn("[REDACTED]", contents)
+                self.assertNotIn(secret, contents)
+        finally:
+            import shutil
+
+            _release_main_window_test_logging(self._module, restore_setup=None)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
 
 class TestDocumentPanel(unittest.TestCase):
     @classmethod
