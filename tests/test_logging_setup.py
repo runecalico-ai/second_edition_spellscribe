@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import unittest
 from contextlib import contextmanager
@@ -305,3 +307,53 @@ class SetupLoggingTests(unittest.TestCase):
             self.assertEqual(first.log_file_path, logs_dir / "error.log")
             self.assertEqual(second.log_file_path, logs_dir / "error.1.log")
             self.assertFalse(first._claim_handle.closed)
+
+
+@unittest.skipUnless(sys.platform == "win32", "log claim uses msvcrt on Windows")
+class LogRestartRotationTests(unittest.TestCase):
+    def test_setup_logging_rotates_primary_log_across_process_restart(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            logs_dir = Path(tmp_dir)
+            prior_message = "session-one failure"
+
+            first_script = textwrap.dedent(
+                f"""
+                import logging
+                from pathlib import Path
+                from app.utils.logging_setup import setup_logging
+
+                result = setup_logging(logs_dir=Path({str(logs_dir)!r}))
+                logging.getLogger("tests.restart").error({prior_message!r})
+                """
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", first_script],
+                check=True,
+                capture_output=True,
+                text=True,
+                cwd=repo_root,
+            )
+            self.assertEqual(completed.stderr, "")
+            self.assertTrue((logs_dir / "error.log").is_file())
+
+            second_script = textwrap.dedent(
+                f"""
+                from pathlib import Path
+                from app.utils.logging_setup import setup_logging
+
+                setup_logging(logs_dir=Path({str(logs_dir)!r}))
+                """
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", second_script],
+                check=True,
+                capture_output=True,
+                text=True,
+                cwd=repo_root,
+            )
+            self.assertEqual(completed.stderr, "")
+
+            old_contents = (logs_dir / "error.old.log").read_text(encoding="utf-8")
+            self.assertIn(prior_message, old_contents)
+            self.assertEqual((logs_dir / "error.log").read_text(encoding="utf-8"), "")
