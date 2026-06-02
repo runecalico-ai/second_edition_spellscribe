@@ -14,7 +14,7 @@ Read @AGENTS.md for all project instructions.
 ## deps
 ```
 app\ui\main_window.py ← __future__, PySide6, app, fitz
-app\utils\logging_setup.py ← __future__, app, msvcrt
+app\utils\logging_setup.py ← __future__, app
 tests\test_logging_setup.py ← __future__, app, unittest
 tests\test_ui_main_window.py ← __future__, types, unittest, app, PySide6
 app\build_config.py ← __future__
@@ -253,6 +253,8 @@ class APIKeyRedactionFilterTests(unittest.TestCase)
   def test_filter_leaves_message_unchanged_when_key_is_empty() → None
   def test_set_api_key_updates_redaction_behavior() → None
   def test_filter_replaces_api_key_in_exception_traceback_text() → None
+class LoggingSetupImportSafetyTests(unittest.TestCase)
+  def test_module_import_is_safe_when_msvcrt_is_unavailable() → None
 class LogRotationTests(unittest.TestCase)
   def test_rotate_primary_log_moves_error_log_to_old_log() → None
   def test_rotate_primary_log_is_noop_when_error_log_missing() → None
@@ -270,8 +272,6 @@ class SetupLoggingTests(unittest.TestCase)
   def test_setup_logging_records_background_thread_name() → None
   def worker() → None
   def test_setup_logging_returns_result_that_keeps_claim_alive() → None
-class LogRestartRotationTests(unittest.TestCase)
-  def test_setup_logging_rotates_primary_log_across_process_restart() → None
 ```
 
 ### tests\test_ui_main_window.py
