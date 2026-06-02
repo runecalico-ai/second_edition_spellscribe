@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import logging
-import msvcrt
 import time
 from dataclasses import dataclass
 from io import TextIOWrapper
 from pathlib import Path
 
 from app.paths import spellscribe_logs_dir
+
+try:
+    import msvcrt
+except ModuleNotFoundError:  # pragma: no cover - exercised via subprocess import-safety test.
+    msvcrt = None
 
 _REDACTED_PLACEHOLDER = "[REDACTED]"
 _MAX_LOG_SUFFIX = 99
@@ -65,6 +69,9 @@ def _log_file_name_for_suffix(index: int) -> str:
 
 
 def _try_claim_log_file(log_path: Path) -> TextIOWrapper | None:
+    if msvcrt is None:
+        raise RuntimeError("SpellScribe log file locking requires Windows msvcrt.")
+
     log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         handle = log_path.open("a+", encoding="utf-8")

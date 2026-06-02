@@ -39,11 +39,11 @@ python -m unittest `
 |------|--------|---------------|
 | 3.1 | PASS (automated + manual proxy 2026-05-30) | SetupLoggingTests.test_setup_logging_creates_warning_level_file_with_utc_format, SetupLoggingTests.test_setup_logging_records_background_thread_name, TestMainWindowWorkerLoggingIntegration.test_worker_failed_writes_error_to_claimed_log |
 | 3.2 | PASS | LogRotationTests (in-process), LogClaimTests.test_claim_log_file_path_rotates_primary_before_claiming, LogRestartRotationTests.test_setup_logging_rotates_primary_log_across_process_restart |
-| 3.3 | PASS | LogClaimTests (simulated lock), SetupLoggingTests.test_setup_logging_returns_result_that_keeps_claim_alive; operator dual-GUI manual 2026-05-30 |
+| 3.3 | PARTIAL (manual pending) | M-001: automated proxy coverage from LogClaimTests (simulated lock) and SetupLoggingTests.test_setup_logging_returns_result_that_keeps_claim_alive is complete, but operator dual-GUI evidence belongs to the Manual Checklist below. |
 | 3.4 | PASS | APIKeyRedactionFilterTests, SetupLoggingTests.test_setup_logging_applies_redaction_filter, TestMainWindowWorkerLoggingIntegration.test_worker_failed_redacts_api_key_in_log_file |
-| 3.5 | PASS | TestMainWindowOpenLogsFolder.test_open_logs_folder_starts_explorer_at_logs_dir; operator real Explorer manual 2026-05-30 |
+| 3.5 | PARTIAL (manual pending) | M-001: automated coverage from TestMainWindowOpenLogsFolder.test_open_logs_folder_starts_explorer_at_logs_dir is complete, but real Explorer confirmation belongs to the Manual Checklist below. |
 
-**Footnote:** Manual Checklist 3.3 and 3.5 confirmed PASS by operator (dual GUI + real Explorer, 2026-05-30).
+**H-001 / M-001 note:** This automated audit does not satisfy the Task 5 manual checklist. Per the plan, 3.1, 3.2, and 3.4 can be marked PASS from automated evidence here, while 3.3 and 3.5 stay PARTIAL until the real human/manual verification is recorded below.
 
 **Note:** Task 1 Step 3 git commit intentionally deferred (operator did not request commit).
 
@@ -69,30 +69,26 @@ Post-regression: all 23 targeted audit tests listed in the Automated Audit table
 
 **Note:** Verification plan Task 4 Step 3 git commit intentionally deferred (operator did not request commit).
 
-## Manual Checklist (2026-05-30)
+## Manual Checklist (2026-05-30 status corrected for H-001)
 
 **Environment:** Windows 10+, venv activated, logs dir `%APPDATA%\SpellScribe\logs`.
 
-**Method:** Subprocess proxies (`scripts/task5_manual_verification_proxy.py`) for 3.1–3.4; operator manual GUI for 3.3 and 3.5 (confirmed 2026-05-30).
+**H-001 status:** The Task 5 real human/manual checklist was not fully performed as written in the plan. The required dev GUI launch, Settings/local plaintext key entry, document open, forced Detect Spells failure, restart rotation check, and real log inspection sequence for 3.1, 3.2, and 3.4 was not captured as genuine manual evidence. This section is therefore marked not complete.
+
+**Method actually performed:** proxy/subprocess evidence was recorded for 3.1-3.4, and operator GUI/manual confirmation was recorded only for 3.3 and 3.5 on 2026-05-30. That evidence is useful background, but it does not close Task 5 per plan.
 
 | Task | Result | Notes |
 |------|--------|-------|
-| 3.1 | PASS | Subprocess proxy: `setup_logging()` + `logger.error("task5-proxy-3.1-log-creation")`; `error.log` created; UTC line with thread name |
-| 3.2 | PASS | Subprocess proxy: second process after first exits; prior session in `error.old.log`; new `error.log` empty after rotation |
-| 3.3 | PASS | Operator: two concurrent `python -m app.ui.main_window` instances; `error.log` + `error.1.log` with separate instance writes (also covered by proxy + `LogClaimTests`) |
-| 3.4 | PASS | Subprocess proxy: `api_key` redacted to `[REDACTED]` in log file; raw key absent |
-| 3.5 | PASS | Operator: toolbar **Open Logs Folder** opened Explorer at `%APPDATA%\SpellScribe\logs` (also covered by `TestMainWindowOpenLogsFolder`) |
+| 3.1 | NOT RUN MANUALLY (H-001) | Only subprocess/proxy evidence was recorded; the planned GUI-driven failure and real log inspection were not documented as actually performed. |
+| 3.2 | NOT RUN MANUALLY (H-001) | Only subprocess/proxy restart evidence was recorded; the planned close/relaunch app flow and manual `error.old.log` inspection were not documented as actually performed. |
+| 3.3 | PASS (manual) | Operator recorded two concurrent `python -m app.ui.main_window` instances and separate `error.log` / `error.1.log` writes on 2026-05-30. |
+| 3.4 | NOT RUN MANUALLY (H-001) | Only subprocess/proxy redaction evidence was recorded; the planned Settings plaintext-key entry, forced Detect Spells failure, and real log inspection were not documented as actually performed. |
+| 3.5 | PASS (manual, partial evidence) | Operator recorded that toolbar **Open Logs Folder** opened Explorer at `%APPDATA%\SpellScribe\logs` on 2026-05-30. |
 
-**Proxy script:** `python scripts/task5_manual_verification_proxy.py` (exit 0; subprocess checks 3.1–3.4 pass).
-
-**Log evidence (redacted snippets):**
-
-- `%APPDATA%\SpellScribe\logs\error.log`: `... Authentication failed for key [REDACTED]`
-- `%APPDATA%\SpellScribe\logs\error.1.log`: `... task5-proxy-3.3-secondary-instance`
-- `%APPDATA%\SpellScribe\logs\error.old.log`: contains rotated prior-session content including `task5-proxy-3.2-prior-session`
+**Remaining manual work required by plan for H-001:** complete the Task 5 checklist with real operator evidence before claiming Task 6 readiness.
 
 **Note:** Task 5 Step 8 git commit intentionally deferred (operator did not request commit).
 
 ## Final Assessment
 
-Automated verification complete (500-test regression, 23-test targeted audit, gap tests). Manual checklist: **3.1–3.5 PASS** (subprocess proxy for 3.1–3.4; operator confirmed dual-GUI multi-instance logging and real Explorer for 3.3 and 3.5 on 2026-05-30). All OpenSpec §1–§3 tasks marked complete in `tasks.md`. Change is ready for archive review (frozen EXE smoke remains recommended pre-release per verification plan out-of-scope note).
+Automated verification is complete (500-test regression, 23-test targeted audit, gap tests). **H-001 correction:** the Task 5 manual checklist is not complete as planned; only 3.3 and 3.5 have recorded operator/manual evidence, while 3.1, 3.2, and 3.4 remain not manually run/documented per the required workflow. The change is therefore **not yet ready to claim full manual verification or Task 6 readiness** until the real checklist is performed and recorded.

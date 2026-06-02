@@ -15,8 +15,8 @@
 
 ## 3. Verification
 
-- [x] 3.1 Verify log creation and detailed format (including thread name).
-- [x] 3.2 Verify `error.old.log` rotation on restart.
+- [ ] 3.1 Verify log creation and detailed format (including thread name). H-001: automated/proxy evidence exists, but required Task 5 manual GUI/log-inspection checklist is not yet truthfully completed.
+- [ ] 3.2 Verify `error.old.log` rotation on restart. H-001: automated/proxy evidence exists, but required Task 5 manual restart/log-inspection checklist is not yet truthfully completed.
 - [x] 3.3 Verify multi-instance safe logging (open two apps, check for `error.1.log`).
-- [x] 3.4 Verify API key redaction in the log file.
+- [ ] 3.4 Verify API key redaction in the log file. H-001: automated/proxy evidence exists, but required Task 5 manual Settings/plaintext-key failure flow and log inspection are not yet truthfully completed.
 - [x] 3.5 Verify "Open Logs Folder" toolbar action opens Explorer.

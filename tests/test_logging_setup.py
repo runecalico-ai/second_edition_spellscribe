@@ -124,6 +124,45 @@ class APIKeyRedactionFilterTests(unittest.TestCase):
         self.assertIn(_REDACTED_PLACEHOLDER, formatted)
 
 
+class LoggingSetupImportSafetyTests(unittest.TestCase):
+    def test_module_import_is_safe_when_msvcrt_is_unavailable(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        script = textwrap.dedent(
+            """
+            import builtins
+            import importlib
+            import sys
+
+            original_import = builtins.__import__
+
+            def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+                if name == "msvcrt":
+                    raise ModuleNotFoundError("No module named 'msvcrt'")
+                return original_import(name, globals, locals, fromlist, level)
+
+            builtins.__import__ = fake_import
+            try:
+                sys.modules.pop("app.utils.logging_setup", None)
+                module = importlib.import_module("app.utils.logging_setup")
+                assert module.msvcrt is None
+                assert hasattr(module, "setup_logging")
+            finally:
+                builtins.__import__ = original_import
+            """
+        )
+
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=repo_root,
+        )
+
+        self.assertEqual(completed.stdout, "")
+        self.assertEqual(completed.stderr, "")
+
+
 @unittest.skipUnless(sys.platform == "win32", "log file locking requires Windows msvcrt")
 class LogRotationTests(unittest.TestCase):
     def test_rotate_primary_log_moves_error_log_to_old_log(self) -> None:
