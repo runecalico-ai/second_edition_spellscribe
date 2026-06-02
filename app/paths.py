@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 _APP_SUBDIR = "SpellScribe"
+_LOGS_SUBDIR = "logs"
 _BUNDLED_TESSERACT_SUBDIR = Path("vendor") / "tesseract"
 _TESSERACT_EXE_NAME = "tesseract.exe"
 
@@ -18,6 +19,11 @@ def spellscribe_data_dir() -> Path:
     else:
         base_dir = Path.home() / "AppData" / "Roaming"
     return base_dir / _APP_SUBDIR
+
+
+def spellscribe_logs_dir() -> Path:
+    """Return the SpellScribe log directory under the application data folder."""
+    return spellscribe_data_dir() / _LOGS_SUBDIR
 
 
 def is_frozen_runtime() -> bool:
@@ -63,7 +69,7 @@ def resolve_tesseract_executable(configured_path: str | Path | None) -> str:
     if bundled_dir is None:
         return ""
     bundled_executable = bundled_dir / _TESSERACT_EXE_NAME
-    if bundled_executable.exists():
+    if bundled_executable.is_file():
         return str(bundled_executable)
     return ""
 
@@ -93,7 +99,7 @@ def resolve_tessdata_prefix(tesseract_executable: str | Path | None) -> str:
         seen.add(normalized_root)
 
         tessdata_dir = normalized_root / "tessdata"
-        if tessdata_dir.exists():
+        if tessdata_dir.is_dir():
             return str(tessdata_dir)
 
     return ""

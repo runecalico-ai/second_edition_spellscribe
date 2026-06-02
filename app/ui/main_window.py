@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import threading
+from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QThread, Qt
 from PySide6.QtWidgets import (
@@ -27,16 +29,53 @@ import fitz
 from app.pipeline.identity import compute_sha256_hex
 from app.pipeline.ingestion import route_document
 from app.config import AppConfig
+from app.paths import spellscribe_logs_dir
+from app.utils.logging_setup import LoggingSetupResult, setup_logging
 from app.session import SessionState, restore_session_state_for_source
 from app.ui.identity_dialog import DocumentIdentityDialog
 from app.ui.settings_dialog import SettingsDialog
 from app.ui.workers import DetectSpellsWorker, ExtractWorker
 
-if TYPE_CHECKING:
-    from app.config import AppConfig
-
-
 _LOGGER = logging.getLogger(__name__)
+
+_app_logging_setup: LoggingSetupResult | None = None
+
+
+def _resolve_api_key_for_redaction(config: AppConfig) -> str:
+    """Return the runtime API key string for log redaction, or '' if unavailable."""
+    from app.pipeline.extraction import _resolve_anthropic_api_key
+
+    with suppress(RuntimeError):
+        return _resolve_anthropic_api_key(config)
+    return ""
+
+
+def _init_app_logging(
+    config: AppConfig,
+    *,
+    logs_dir: Path | None = None,
+) -> LoggingSetupResult | None:
+    """Configure process-wide file logging; return None if claim fails."""
+    global _app_logging_setup
+    if _app_logging_setup is not None:
+        return _app_logging_setup
+    try:
+        _app_logging_setup = setup_logging(
+            logs_dir=logs_dir,
+            api_key=_resolve_api_key_for_redaction(config),
+        )
+    except (RuntimeError, OSError):
+        _app_logging_setup = None
+        return None
+    return _app_logging_setup
+
+
+def _sync_logging_redaction_from_config(config: AppConfig) -> None:
+    if _app_logging_setup is None:
+        return
+    _app_logging_setup.redaction_filter.set_api_key(
+        _resolve_api_key_for_redaction(config)
+    )
 
 
 class SpellScribeMainWindow(QMainWindow):
@@ -99,6 +138,26 @@ class SpellScribeMainWindow(QMainWindow):
 
         self._action_settings = tb.addAction("Settings")
         self._action_settings.triggered.connect(self._on_settings)
+
+        tb.addSeparator()
+
+        self._action_open_logs = tb.addAction("Open Logs Folder")
+        self._action_open_logs.setToolTip(
+            "Open the SpellScribe logs folder in File Explorer."
+        )
+        self._action_open_logs.triggered.connect(self._on_open_logs_folder)
+
+    def _on_open_logs_folder(self) -> None:
+        logs_dir = spellscribe_logs_dir()
+        try:
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            os.startfile(os.fspath(logs_dir))
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                "Open Logs Folder",
+                f"Could not open the logs folder:\n{exc}",
+            )
 
     def _update_action_states(self) -> None:
         has_session = self._session is not None
@@ -818,17 +877,32 @@ class SpellScribeMainWindow(QMainWindow):
         return True
 
     def _on_settings(self) -> None:
+        # Redaction sync reads self._config after Accept. SettingsDialog._on_save
+        # mutates the passed config in place (_original_config) before accept().
         dlg = SettingsDialog(config=self._config, parent=self)
-        dlg.exec()
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            _sync_logging_redaction_from_config(self._config)
 
 
-if __name__ == "__main__":
-    import sys
+def _run_gui(argv: list[str] | None = None) -> int:
+    """Create the Qt application, initialize logging, and run the event loop."""
     from PySide6.QtWidgets import QApplication
 
-    app = QApplication(sys.argv)
+    qt_argv = list(argv) if argv is not None else sys.argv
+    app = QApplication(qt_argv)
     config = AppConfig.load()
+    if _init_app_logging(config, logs_dir=None) is None:
+        QMessageBox.warning(
+            None,
+            "SpellScribe Logging",
+            "Could not open a log file in the SpellScribe logs folder. "
+            "The app will continue, but errors may not be saved to disk.",
+        )
     window = SpellScribeMainWindow(config=config)
     window.resize(1200, 800)
     window.show()
-    sys.exit(app.exec())
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(_run_gui())
